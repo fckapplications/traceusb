@@ -1,0 +1,19 @@
+# Windows
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Output
+analise.txt
+
+# Logs
+*.log
+
+# Temp
+*.tmp
+
+# VSCode
+.vscode/
+
+# PowerShell metadata
+*.ps1.xml
