@@ -79,7 +79,7 @@ No data leaves the machine.
 ### Run locally
 
 ```powershell
-.\analise-log.ps1
+.\TraceUSB.ps1
 ```
 
 ---
@@ -87,7 +87,7 @@ No data leaves the machine.
 ### Run remotely (quick execution)
 
 ```powershell
-irm https://raw.githubusercontent.com/fckapplications/traceusb/main/analise-log.ps1 | iex
+irm https://raw.githubusercontent.com/fckapplications/traceusb/main/TraceUSB.ps1 | iex
 ```
 
 ---
@@ -95,7 +95,7 @@ irm https://raw.githubusercontent.com/fckapplications/traceusb/main/analise-log.
 ### Run with execution policy bypass
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/fckapplications/traceusb/main/analise-log.ps1 | iex"
+powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/fckapplications/traceusb/main/TraceUSB.ps1 | iex"
 ```
 
 ---
@@ -103,7 +103,7 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
 ### Safer method (download + execute)
 
 ```powershell
-irm https://raw.githubusercontent.com/fckapplications/traceusb/main/analise-log.ps1 -OutFile traceusb.ps1
+irm https://raw.githubusercontent.com/fckapplications/traceusb/main/TraceUSB.ps1 -OutFile traceusb.ps1
 powershell -ExecutionPolicy Bypass -File traceusb.ps1
 ```
 
@@ -133,7 +133,7 @@ The report is divided into:
 
 ```text
 .
-├── analise-log.ps1
+├── TraceUSB.ps1
 ├── README.md
 ├── LICENSE
 ├── .gitignore
