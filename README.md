@@ -24,6 +24,9 @@ The goal is simple: provide **clear visibility** into what happened on the machi
 * Windows Defender engine failures (Event ID 5010)
 * Listing of currently connected USB devices
 * Clean and structured output
+* USB device type classification (storage, audio, input, etc)
+* USB session duration tracking
+* Chronological timeline output (timeline.txt)
 
 ---
 
@@ -91,6 +94,16 @@ Possible scenarios:
 
 * Device still connected
 * Removal not recorded by the system
+
+#### USB Enhancements
+
+TraceUSB now provides additional context for USB activity:
+
+- Device type classification (based on device name)
+- Usage duration for connected devices
+- Improved timeline correlation
+
+This allows better understanding of how long a device was connected and what kind of device it was.
 
 ---
 

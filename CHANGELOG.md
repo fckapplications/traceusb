@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.0] - USB Context & Timeline Improvements
+
+### Added
+- USB device type classification
+- USB session duration calculation
+- Dedicated timeline output (timeline.txt)
+
+### Improved
+- Better contextual understanding of USB activity
+- Enhanced chronological correlation of events
+
+---
+
 ## [1.1.0] - Enhanced Defender Visibility
 
 ### Added
