@@ -148,6 +148,58 @@ ForEach-Object {
 }
 
 # ======================================
+# 7. WINDOWS DEFENDER (CONFIGURACAO E FALHAS)
+# ======================================
+
+Write-Section "WINDOWS DEFENDER (CONFIGURACAO E FALHAS)"
+
+Get-WinEvent -FilterHashtable @{
+    LogName = 'Microsoft-Windows-Windows Defender/Operational'
+    Id = 5004,5010
+} -ErrorAction SilentlyContinue |
+Sort-Object TimeCreated -Descending |
+ForEach-Object {
+
+    $msg = $_.Message
+    $cleanMsg = ($msg -replace "`r|`n", " ").Trim()
+
+    $evento = switch ($_.Id) {
+        5004 { "Configuracao alterada" }
+        5010 { "Falha no engine" }
+        default { "Evento desconhecido" }
+    }
+
+    $result.Add("Data/Horario: $($_.TimeCreated)")
+    $result.Add("Evento: $evento")
+    $result.Add("Detalhes: $cleanMsg")
+    $result.Add("")
+}
+
+# ======================================
+# 8. WINDOWS DEFENDER (STATUS - DESATIVACAO)
+# ======================================
+
+Write-Section "WINDOWS DEFENDER (STATUS)"
+
+Get-WinEvent -FilterHashtable @{
+    LogName = 'Microsoft-Windows-Windows Defender/Operational'
+    Id = 5001
+} -ErrorAction SilentlyContinue |
+Sort-Object TimeCreated -Descending |
+ForEach-Object {
+
+    $msg = $_.Message
+
+    # opcional: limpar mensagem (remover quebra de linha excessiva)
+    $cleanMsg = ($msg -replace "`r|`n", " ").Trim()
+
+    $result.Add("Data/Horario: $($_.TimeCreated)")
+    $result.Add("Evento: Windows Defender desativado")
+    $result.Add("Detalhes: $cleanMsg")
+    $result.Add("")
+}
+
+# ======================================
 # FINAL
 # ======================================
 

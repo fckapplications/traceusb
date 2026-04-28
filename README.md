@@ -8,7 +8,9 @@ Lightweight Windows USB and system event analyzer with clean, local-only output.
 
 TraceUSB is a PowerShell-based utility designed to extract **objective system event data** related to USB activity and security-relevant logs on Windows systems.
 
-It generates a **structured, human-readable report** without performing interpretation, scoring, or behavioral assumptions.
+It generates a **structured, human-readable report** without interpretation, scoring, or behavioral assumptions.
+
+The goal is simple: provide **clear visibility** into what happened on the machine.
 
 ---
 
@@ -16,7 +18,10 @@ It generates a **structured, human-readable report** without performing interpre
 
 * USB connection and removal timestamps
 * Detection of Windows log clearing events (Event ID 104)
-* Windows Defender detection events (Event IDs 1116 / 1117)
+* Windows Defender detections (Event IDs 1116 / 1117)
+* Windows Defender status changes (Event ID 5001)
+* Windows Defender configuration changes (Event ID 5004)
+* Windows Defender engine failures (Event ID 5010)
 * Listing of currently connected USB devices
 * Clean and structured output
 
@@ -34,7 +39,7 @@ Desktop\analise.txt
 
 ## What the Script Analyzes
 
-TraceUSB collects data from three main sources:
+TraceUSB collects data from multiple native Windows sources.
 
 ---
 
@@ -42,45 +47,47 @@ TraceUSB collects data from three main sources:
 
 Source: Windows Event Log (System)
 
-Detects when a Windows event log has been manually cleared.
+Detects when a Windows log has been manually cleared.
 
 Collected data:
 
 * Log name (e.g. System, Security, Setup)
-* Date and time of the action
+* Date and time
 
 Purpose:
 
-* Identify potential attempts to remove system activity traces
+* Identify potential attempts to remove activity traces
 
 ---
 
 ### 2. USB Device Activity
 
-Source: Plug and Play (PnP) subsystem
+Source: Plug and Play (PnP)
 
 #### Connected and Removed Devices
 
 Collected data:
 
-* Device name (FriendlyName)
-* Date and time of connection
-* Date and time of removal
+* Device name
+* Connection timestamp
+* Removal timestamp
 
-These timestamps come from:
+Source:
 
-```text
+```
 Get-PnpDeviceProperty → LastArrivalDate / LastRemovalDate
 ```
+
+---
 
 #### Only Connected Devices
 
 Devices that:
 
 * Have a connection timestamp
-* Do not have a recorded removal event
+* Do not have a recorded removal
 
-This may indicate:
+Possible scenarios:
 
 * Device still connected
 * Removal not recorded by the system
@@ -89,61 +96,90 @@ This may indicate:
 
 ### 3. Active USB Devices
 
-Source: Current device state via PnP
-
-Collected data:
-
-* Device name of all currently connected USB devices
+Snapshot of all currently connected USB devices.
 
 Filtering removes:
 
-* USB hubs
+* Hubs
 * Host controllers
 * Root devices
 
 Purpose:
 
-* Provide a snapshot of what is physically connected at execution time
+* Show what is physically connected at execution time
 
 ---
 
-### 4. Windows Defender Events (1116 / 1117)
+### 4. Windows Defender — Detection Events (1116 / 1117)
 
 Source:
 `Microsoft-Windows-Windows Defender/Operational`
 
-#### Event ID 1116 — Malware Detected
-
-Indicates that Windows Defender detected a threat.
-
-#### Event ID 1117 — Action Taken
-
-Indicates that Defender took action (removal, quarantine, etc.)
+* **1116 → Threat detected**
+* **1117 → Action taken**
 
 Collected data:
 
-* Date and time of the event
+* Date and time
 * Threat name
-* File path associated with the detection
+* File path
 
-Important:
+---
 
-* Only metadata is collected
-* No file content is accessed
+### 5. Windows Defender — Status (5001)
+
+Indicates that Microsoft Defender Antivirus was **disabled**.
+
+Collected data:
+
+* Date and time
+* Full event message
 
 Purpose:
 
-* Provide visibility into recent security detections on the system
+* Detect when system protection was turned off
+
+---
+
+### 6. Windows Defender — Configuration Changes (5004)
+
+Indicates that a Defender setting was modified.
+
+Examples:
+
+* Exclusions added
+* Protection toggled
+* Policy changes
+
+Collected data:
+
+* Date and time
+* Event message
+
+---
+
+### 7. Windows Defender — Engine Failures (5010)
+
+Indicates that Defender failed to execute an operation.
+
+Possible causes:
+
+* Internal error
+* Scan failure
+* External interference
+
+Collected data:
+
+* Date and time
+* Event message
 
 ---
 
 ## Data Sources
 
-TraceUSB relies exclusively on native Windows components:
-
-* `Get-WinEvent` → Event logs
-* `Get-PnpDevice` → Device enumeration
-* `Get-PnpDeviceProperty` → USB timestamps
+* `Get-WinEvent`
+* `Get-PnpDevice`
+* `Get-PnpDeviceProperty`
 
 No external dependencies.
 
@@ -153,19 +189,18 @@ No external dependencies.
 
 TraceUSB is **fully local and non-invasive**.
 
-It **does NOT collect, access, or transmit**:
+It does NOT:
 
-* Personal files
-* File contents
-* Browser history
-* Credentials or tokens
-* Network traffic
-* Any external data
+* Read personal files
+* Access file contents
+* Collect credentials
+* Monitor network activity
+* Send any data externally
 
 It only reads:
 
 * System event metadata
-* USB device metadata (name and timestamps)
+* USB device metadata
 
 No data leaves the machine.
 
@@ -174,7 +209,7 @@ No data leaves the machine.
 ## Requirements
 
 * Windows 10 / 11
-* PowerShell 5.1 or higher
+* PowerShell 5.1+
 * Standard user permissions
 
 ---
@@ -205,7 +240,7 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
 
 ---
 
-### Safer method (download + execute)
+### Safer method
 
 ```powershell
 irm https://raw.githubusercontent.com/fckapplications/traceusb/main/TraceUSB.ps1 -OutFile traceusb.ps1
@@ -223,20 +258,22 @@ The report is divided into:
 * USB (only connected)
 * Active USB devices
 * Windows Defender detections
+* Windows Defender configuration & failures
+* Windows Defender status changes
 
 ---
 
 ## Limitations
 
-* Not all USB devices expose connection/removal timestamps
+* Not all USB devices expose timestamps
 * Data depends on drivers and Windows internals
-* Does not reconstruct full usage sessions
+* Does not reconstruct full activity sessions
 
 ---
 
 ## Project Structure
 
-```text
+```
 .
 ├── TraceUSB.ps1
 ├── README.md
@@ -247,19 +284,13 @@ The report is divided into:
 
 ---
 
-## Versioning
-
-Semantic versioning is used.
-
----
-
 ## Contributing
 
-Contributions are welcome, especially for:
+Contributions are welcome:
 
-* Improved parsing
-* Additional event sources
-* Performance optimization
+* Parsing improvements
+* New event sources
+* Performance optimizations
 
 ---
 
