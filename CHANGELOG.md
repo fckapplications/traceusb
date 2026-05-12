@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.3.0] - Process Correlation & Behavioral Timeline
+
+### Added
+- Process creation monitoring (Event ID 4688)
+- Detection of executables launched from removable drives
+- Parent/child process correlation
+- Automatic enabling of Process Creation auditing
+- Behavioral timeline reconstruction
+
+### Improved
+- Stronger USB-to-process correlation
+- Expanded chronological analysis capabilities
+- Better visibility into short-lived executable activity
+
+---
+
 ## [1.2.0] - USB Context & Timeline Improvements
 
 ### Added

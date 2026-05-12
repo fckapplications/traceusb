@@ -27,6 +27,11 @@ The goal is simple: provide **clear visibility** into what happened on the machi
 * USB device type classification (storage, audio, input, etc)
 * USB session duration tracking
 * Chronological timeline output (timeline.txt)
+* Process creation monitoring (Event ID 4688)
+* Detection of executables launched from removable drives
+* Parent/child process correlation
+* Automatic enabling of Windows Process Creation auditing
+* Behavioral timeline reconstruction
 
 ---
 
@@ -188,11 +193,44 @@ Collected data:
 
 ---
 
+### 8. Process Creation Events (4688)
+
+Source:
+`Security Log`
+
+TraceUSB can now collect recent process creation events using Windows Security Auditing.
+
+Collected data:
+
+* Executable name
+* Full executable path
+* Parent process
+* Execution timestamp
+
+Additional correlation:
+
+* Detection of processes executed directly from removable drives
+* Timeline integration with USB activity and Defender events
+
+Examples:
+
+```text
+USB connected
+↓
+loader.exe executed from E:\
+↓
+Defender configuration changed
+↓
+USB removed
+
+---
+
 ## Data Sources
 
 * `Get-WinEvent`
 * `Get-PnpDevice`
 * `Get-PnpDeviceProperty`
+* `auditpol`
 
 No external dependencies.
 
@@ -273,6 +311,9 @@ The report is divided into:
 * Windows Defender detections
 * Windows Defender configuration & failures
 * Windows Defender status changes
+* Process execution events
+* Removable drive execution correlation
+* Behavioral timeline reconstruction
 
 ---
 
@@ -281,6 +322,8 @@ The report is divided into:
 * Not all USB devices expose timestamps
 * Data depends on drivers and Windows internals
 * Does not reconstruct full activity sessions
+* Event ID 4688 depends on Windows Security Auditing availability
+* Some systems may restrict Security Log access without administrative privileges
 
 ---
 

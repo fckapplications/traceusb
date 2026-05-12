@@ -9,6 +9,26 @@ $timelinePath = "$desktop\timeline.txt"
 $result = New-Object System.Collections.Generic.List[string]
 $timeline = @()
 
+# ======================================
+# HABILITAR AUDITORIA DE PROCESSOS (4688)
+# ======================================
+
+$isAdmin = (
+    New-Object Security.Principal.WindowsPrincipal(
+        [Security.Principal.WindowsIdentity]::GetCurrent()
+    )
+).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+
+if ($isAdmin) {
+
+    try {
+        auditpol /set /subcategory:"Process Creation" /success:enable /failure:enable | Out-Null
+    }
+    catch {}
+}
+
 function Write-Section {
     param($title)
     $result.Add("")
@@ -34,6 +54,13 @@ function Get-Duration {
 
     $span = New-TimeSpan -Start $start -End $end
     return "{0:hh\:mm\:ss}" -f $span
+}
+function Test-RemovablePath {
+    param($path)
+
+    if (-not $path) { return $false }
+
+    return $path -match '^[E-H]:\\'
 }
 
 # ======================================
@@ -279,6 +306,68 @@ ForEach-Object {
         Evento = "Desativado"
         Detalhes = $cleanMsg
     }
+}
+
+# ======================================
+# 9. PROCESSOS RECENTES (4688)
+# ======================================
+
+Write-Section "PROCESSOS RECENTES"
+
+try {
+
+    $processEvents = Get-WinEvent -FilterHashtable @{
+        LogName = 'Security'
+        Id = 4688
+        StartTime = (Get-Date).AddHours(-24)
+    } -ErrorAction Stop |
+    Sort-Object TimeCreated -Descending
+
+    foreach ($evt in $processEvents) {
+
+        $msg = $evt.Message
+
+        $processMatch = [regex]::Match($msg, 'Novo Nome do Processo:\s+(.+)')
+        $parentMatch  = [regex]::Match($msg, 'Nome do Processo Criador:\s+(.+)')
+
+        $processPath = if ($processMatch.Success) {
+            $processMatch.Groups[1].Value.Trim()
+        } else {
+            "N/A"
+        }
+
+        $parentPath = if ($parentMatch.Success) {
+            $parentMatch.Groups[1].Value.Trim()
+        } else {
+            "N/A"
+        }
+
+        $processName = Split-Path $processPath -Leaf
+        $isUSB = Test-RemovablePath $processPath
+
+        if ($isUSB) {
+
+            $result.Add("Processo: $processName")
+            $result.Add("Origem: Unidade removivel")
+            $result.Add("Caminho: $processPath")
+            $result.Add("Processo Pai: $parentPath")
+            $result.Add("Data/Horario: $($evt.TimeCreated)")
+            $result.Add("")
+
+            $timeline += [PSCustomObject]@{
+                Time = $evt.TimeCreated
+                Tipo = "PROCESS"
+                Evento = "Execucao via USB"
+                Detalhes = $processPath
+            }
+        }
+    }
+}
+catch {
+
+    $result.Add("Nao foi possivel acessar Event ID 4688.")
+    $result.Add("Execute o PowerShell como Administrador.")
+    $result.Add("")
 }
 
 # ======================================
