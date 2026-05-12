@@ -36,6 +36,22 @@ function Write-Section {
     $result.Add("")
 }
 
+function Add-TimelineEvent {
+    param(
+        [datetime]$Time,
+        [string]$Tipo,
+        [string]$Evento,
+        [string]$Detalhes
+    )
+
+    $timeline += [PSCustomObject]@{
+        Time      = $Time
+        Tipo      = $Tipo
+        Evento    = $Evento
+        Detalhes  = $Detalhes
+    }
+}
+
 function Get-USBTipo {
     param($name)
 
@@ -58,9 +74,25 @@ function Get-Duration {
 function Test-RemovablePath {
     param($path)
 
-    if (-not $path) { return $false }
+    if (-not $path) {
+        return $false
+    }
 
-    return $path -match '^[E-H]:\\'
+    $driveLetter = $path.Substring(0,1)
+
+    try {
+        $disk = Get-CimInstance Win32_LogicalDisk |
+            Where-Object {
+                $_.DeviceID -eq "$driveLetter`:"
+            }
+
+        if ($disk -and $disk.DriveType -eq 2) {
+            return $true
+        }
+    }
+    catch {}
+
+    return $false
 }
 
 # ======================================
@@ -371,6 +403,255 @@ catch {
 }
 
 # ======================================
+# 10. PREFETCH RELEVANTE
+# ======================================
+
+Write-Section "PREFETCH RELEVANTE"
+
+$prefetchPath = "C:\Windows\Prefetch"
+
+# Padrões interessantes
+$suspiciousPatterns = @(
+    "TEMP",
+    "TMP",
+    "SETUP",
+    "UPDATE",
+    "UPDATER",
+    "INSTALL",
+    "PATCH",
+    "_UNINS",
+    "LOADER"
+)
+
+if (Test-Path $prefetchPath) {
+
+    Get-ChildItem "$prefetchPath\*.pf" -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.LastWriteTime -ge (Get-Date).AddHours(-24)
+    } |
+    Sort-Object LastWriteTime -Descending |
+    ForEach-Object {
+
+        $exeName = ($_.BaseName -replace "-.*", "").ToUpper()
+
+        $isRelevant = $false
+
+        # Nome altamente randomizado
+        if ($exeName -match '^[A-Z0-9]{10,}$') {
+            $isRelevant = $true
+        }
+
+        # Caracteres unicode / idiomas diferentes
+        elseif ($exeName -match '[^\u0000-\u007F]') {
+            $isRelevant = $true
+        }
+
+        # TMP / transient loaders
+        elseif (
+            $exeName.Contains("TMP") -or
+            $exeName.Contains("_UNINS") -or
+            $exeName.Contains("LOADER")
+        ) {
+            $isRelevant = $true
+        }
+
+        $isKnownNoise = $false
+
+        foreach ($noise in $knownTransitionalNoise) {
+
+        if ($exeName.Contains($noise)) {
+        $isKnownNoise = $true
+        break
+        }
+        }
+
+        if ($isKnownNoise) {
+        return
+        }
+
+        # Padrões transitórios
+        foreach ($pattern in $suspiciousPatterns) {
+
+            if ($exeName.Contains($pattern)) {
+                $isRelevant = $true
+                break
+            }
+        }
+
+        if (-not $isRelevant) {
+            return
+        }
+
+        $result.Add("[!] Execucao relevante detectada")
+        $result.Add("Executavel: $exeName")
+        $result.Add("Ultima execucao: $($_.LastWriteTime)")
+        $result.Add("Arquivo: $($_.Name)")
+        $result.Add("")
+
+        Add-TimelineEvent `
+            -Time $_.LastWriteTime `
+            -Tipo "PREFETCH" `
+            -Evento "Execucao relevante registrada" `
+            -Detalhes $exeName
+    }
+}
+
+# ======================================
+# 11. BAM (EXECUCOES RECENTES)
+# ======================================
+
+Write-Section "BAM (EXECUCOES RECENTES)"
+
+$bamPath = "HKLM:\System\CurrentControlSet\Services\bam\State\UserSettings"
+
+# Ignorar ruido do sistema
+$bamIgnore = @(
+    "SVCHOST",
+    "CONHOST",
+    "RUNDLL32",
+    "DWM",
+    "TASKHOSTW",
+    "DLLHOST",
+    "SEARCHHOST",
+    "SEARCHFILTERHOST",
+    "SEARCHPROTOCOLHOST",
+    "STARTMENUEXPERIENCEHOST",
+    "SHELLEXPERIENCEHOST",
+    "CTFMON",
+    "EXPLORER",
+    "CONSENT"
+)
+
+if (Test-Path $bamPath) {
+
+    Get-ChildItem $bamPath -ErrorAction SilentlyContinue |
+    ForEach-Object {
+
+        try {
+
+            $props = Get-ItemProperty $_.PSPath
+
+            foreach ($property in $props.PSObject.Properties) {
+
+                $name = $property.Name
+
+                # Apenas executáveis e apps relevantes
+                if (
+                    $name -match "\.exe" -or
+                    $name -match "Microsoft\."
+                ) {
+
+                    # Nome amigável
+                    $displayName = Split-Path $name -Leaf
+
+                    if (-not $displayName) {
+                        $displayName = $name
+                    }
+
+                    $displayUpper = $displayName.ToUpper()
+
+                    # Ignorar ruído
+                    $skip = $false
+
+                    foreach ($ignored in $bamIgnore) {
+
+                        if ($displayUpper.StartsWith($ignored)) {
+                            $skip = $true
+                            break
+                        }
+                    }
+
+                    if ($skip) {
+                        continue
+                    }
+
+                    # Timestamp BAM
+                    $bamTime = $null
+
+                    try {
+
+                        if ($property.Value.Length -ge 8) {
+
+                            $fileTime = [BitConverter]::ToInt64(
+                                $property.Value,
+                                0
+                            )
+
+                            $bamTime = [datetime]::FromFileTime($fileTime)
+                        }
+
+                    }
+                    catch {}
+
+                    $result.Add("Executavel: $displayName")
+
+                    if ($bamTime) {
+                        $result.Add("Ultima execucao: $bamTime")
+                    }
+
+                    $result.Add("Origem: $name")
+                    $result.Add("")
+
+                    if ($bamTime) {
+
+                        Add-TimelineEvent `
+                            -Time $bamTime `
+                            -Tipo "BAM" `
+                            -Evento "Execucao registrada no BAM" `
+                            -Detalhes $displayName
+                    }
+                }
+            }
+
+        }
+        catch {}
+    }
+}
+
+# ======================================
+# 12. ARTIFACTS RECENTES
+# ======================================
+
+Write-Section "ARTIFACTS RECENTES"
+
+$artifactPaths = @(
+    "$env:USERPROFILE\Downloads",
+    "$env:TEMP",
+    "$env:LOCALAPPDATA\Temp"
+)
+
+foreach ($path in $artifactPaths) {
+
+    if (-not (Test-Path $path)) {
+        continue
+    }
+
+    Get-ChildItem $path -Recurse -ErrorAction SilentlyContinue |
+    Where-Object {
+        -not $_.PSIsContainer -and
+        $_.LastWriteTime -ge (Get-Date).AddDays(-1) -and
+        (
+            $_.Extension -eq ".exe" -or
+            $_.Extension -eq ".dll"
+        )
+    } |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 50 |
+    ForEach-Object {
+
+        $result.Add("Arquivo: $($_.FullName)")
+        $result.Add("Ultima modificacao: $($_.LastWriteTime)")
+        $result.Add("")
+
+        Add-TimelineEvent `
+            -Time $_.LastWriteTime `
+            -Tipo "ARTIFACT" `
+            -Evento "Arquivo recente" `
+            -Detalhes $_.FullName
+    }
+}
+
+# ======================================
 # FINAL
 # ======================================
 
@@ -378,11 +659,13 @@ catch {
 [System.IO.File]::WriteAllLines($output, $result, [System.Text.Encoding]::UTF8)
 
 # Timeline
-$timelineOutput = $timeline |
-Sort-Object Time -Descending |
+$timeline |
+Sort-Object Time |
 ForEach-Object {
-    "{0} | {1} | {2} | {3}" -f $_.Time, $_.Tipo, $_.Evento, $_.Detalhes
-}
+
+    "$($_.Time) | [$($_.Tipo)] | $($_.Evento) | $($_.Detalhes)"
+
+} | Set-Content $timelinePath -Encoding UTF8
 
 [System.IO.File]::WriteAllLines($timelinePath, $timelineOutput, [System.Text.Encoding]::UTF8)
 
