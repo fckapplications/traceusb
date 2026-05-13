@@ -1,257 +1,253 @@
 # TraceUSB
 
-Lightweight Windows USB and system event analyzer with clean, local-only output.
+Lightweight Windows USB and execution intelligence analyzer with local-only forensic output.
 
 ---
 
 ## Overview
 
-TraceUSB is a PowerShell-based utility designed to extract **objective system event data** related to USB activity and security-relevant logs on Windows systems.
+TraceUSB is a PowerShell-based forensic utility designed to extract objective Windows telemetry related to:
 
-It generates a **structured, human-readable report** without interpretation, scoring, or behavioral assumptions.
+- USB device activity
+- Process execution
+- Runtime overlays
+- Windows Defender events
+- Behavioral correlation
 
-The goal is simple: provide **clear visibility** into what happened on the machine.
+The project focuses on:
+
+- Low-noise forensic visibility
+- Correlated execution evidence
+- Context-aware analysis
+- Chronological reconstruction
+- Human-readable output
+
+Instead of dumping every available artifact, TraceUSB prioritizes suspicious and behaviorally relevant activity.
+
+All analysis is performed locally using native Windows telemetry sources.
 
 ---
 
-## Features
+## Core Capabilities
 
-* USB connection and removal timestamps
-* Detection of Windows log clearing events (Event ID 104)
-* Windows Defender detections (Event IDs 1116 / 1117)
-* Windows Defender status changes (Event ID 5001)
-* Windows Defender configuration changes (Event ID 5004)
-* Windows Defender engine failures (Event ID 5010)
-* Listing of currently connected USB devices
-* Clean and structured output
-* USB device type classification (storage, audio, input, etc)
-* USB session duration tracking
-* Chronological timeline output (timeline.txt)
-* Process creation monitoring (Event ID 4688)
-* Detection of executables launched from removable drives
-* Parent/child process correlation
-* Automatic enabling of Windows Process Creation auditing
-* Behavioral timeline reconstruction
+### USB Analysis
+
+TraceUSB can reconstruct USB-related activity using native Plug and Play telemetry.
+
+Features include:
+
+- USB connection timestamps
+- USB removal timestamps
+- Connected-only device detection
+- Active USB device snapshot
+- USB device type classification
+- USB session duration tracking
+
+Supported device categories:
+
+- Storage devices
+- HID/input devices
+- Audio devices
+- Generic USB peripherals
+
+---
+
+### Windows Defender Visibility
+
+TraceUSB analyzes Microsoft Defender operational logs to identify security-relevant events.
+
+Supported Event IDs:
+
+| Event ID | Description |
+|---|---|
+| 1116 | Threat detected |
+| 1117 | Action taken |
+| 5001 | Defender disabled |
+| 5004 | Defender configuration modified |
+| 5010 | Defender engine failure |
+
+Collected data includes:
+
+- Detection timestamps
+- Threat names
+- File paths
+- Configuration modifications
+- Protection status changes
+
+---
+
+### Process Execution Analysis
+
+TraceUSB supports behavioral reconstruction through Windows Security Auditing.
+
+Features include:
+
+- Process creation monitoring (4688)
+- Full executable path extraction
+- Parent/child process correlation
+- Execution timestamp visibility
+- Automatic Process Creation auditing enablement
+
+Additional visibility:
+
+- Executables launched from removable drives
+- Transitional executable detection
+- Short-lived execution visibility
+
+---
+
+### Correlated Execution Intelligence
+
+Instead of independently dumping BAM, Prefetch, and process artifacts, TraceUSB now correlates execution evidence across multiple telemetry sources.
+
+Current correlation sources:
+
+- BAM
+- Windows Prefetch
+- Event ID 4688
+- Removable drive execution traces
+
+This dramatically reduces forensic noise and improves contextual relevance.
+
+Behavioral prioritization includes:
+
+- Randomized executable names
+- Transitional loaders
+- Temporary executables
+- Unusual execution paths
+- Multi-source execution correlation
+
+---
+
+### Contextual Filtering
+
+TraceUSB uses contextual filtering to reduce common forensic noise.
+
+Implemented filtering layers include:
+
+- Known publisher filtering
+- Known-safe path filtering
+- Suspicious executable heuristics
+- Artifact prioritization
+- Noise reduction logic
+
+Known-safe publishers include:
+
+- Microsoft
+- Google
+- Valve
+- Discord
+- NVIDIA
+- AMD
+- Mozilla
+- OBS
+
+The goal is to surface operationally relevant events instead of overwhelming raw telemetry.
+
+---
+
+### Runtime & Overlay Detection
+
+TraceUSB can identify active runtime overlay ecosystems commonly associated with GPU rendering environments.
+
+Supported runtime visibility:
+
+- NVIDIA ShadowPlay
+- AMD Radeon/ReLive
+- RTSS
+- MSI Afterburner
+- Overlay-based rendering runtimes
+
+Collected data:
+
+- Active runtime processes
+- Overlay-related modules
+- Runtime ecosystem visibility
+
+Additional capabilities:
+
+- NVIDIA screenshot trigger (ALT + F1)
+- AMD screenshot trigger (CTRL + SHIFT + I)
+
+---
+
+## Timeline Reconstruction
+
+TraceUSB generates chronological forensic reconstruction using multiple event sources.
+
+Timeline correlation currently includes:
+
+- USB activity
+- Defender events
+- Process execution
+- Overlay/runtime detections
+- Correlated executions
+
+Generated output:
+
+```text
+Desktop\timeline.txt
+````
 
 ---
 
 ## Output
 
-The script generates a report at:
+TraceUSB generates:
 
 ```text
 Desktop\analise.txt
+Desktop\timeline.txt
 ```
 
----
-
-## What the Script Analyzes
-
-TraceUSB collects data from multiple native Windows sources.
-
----
-
-### 1. Log Clearing Events (Event ID 104)
-
-Source: Windows Event Log (System)
-
-Detects when a Windows log has been manually cleared.
-
-Collected data:
-
-* Log name (e.g. System, Security, Setup)
-* Date and time
-
-Purpose:
-
-* Identify potential attempts to remove activity traces
-
----
-
-### 2. USB Device Activity
-
-Source: Plug and Play (PnP)
-
-#### Connected and Removed Devices
-
-Collected data:
-
-* Device name
-* Connection timestamp
-* Removal timestamp
-
-Source:
-
-```
-Get-PnpDeviceProperty → LastArrivalDate / LastRemovalDate
-```
-
----
-
-#### Only Connected Devices
-
-Devices that:
-
-* Have a connection timestamp
-* Do not have a recorded removal
-
-Possible scenarios:
-
-* Device still connected
-* Removal not recorded by the system
-
-#### USB Enhancements
-
-TraceUSB now provides additional context for USB activity:
-
-- Device type classification (based on device name)
-- Usage duration for connected devices
-- Improved timeline correlation
-
-This allows better understanding of how long a device was connected and what kind of device it was.
-
----
-
-### 3. Active USB Devices
-
-Snapshot of all currently connected USB devices.
-
-Filtering removes:
-
-* Hubs
-* Host controllers
-* Root devices
-
-Purpose:
-
-* Show what is physically connected at execution time
-
----
-
-### 4. Windows Defender — Detection Events (1116 / 1117)
-
-Source:
-`Microsoft-Windows-Windows Defender/Operational`
-
-* **1116 → Threat detected**
-* **1117 → Action taken**
-
-Collected data:
-
-* Date and time
-* Threat name
-* File path
-
----
-
-### 5. Windows Defender — Status (5001)
-
-Indicates that Microsoft Defender Antivirus was **disabled**.
-
-Collected data:
-
-* Date and time
-* Full event message
-
-Purpose:
-
-* Detect when system protection was turned off
-
----
-
-### 6. Windows Defender — Configuration Changes (5004)
-
-Indicates that a Defender setting was modified.
-
-Examples:
-
-* Exclusions added
-* Protection toggled
-* Policy changes
-
-Collected data:
-
-* Date and time
-* Event message
-
----
-
-### 7. Windows Defender — Engine Failures (5010)
-
-Indicates that Defender failed to execute an operation.
-
-Possible causes:
-
-* Internal error
-* Scan failure
-* External interference
-
-Collected data:
-
-* Date and time
-* Event message
-
----
-
-### 8. Process Creation Events (4688)
-
-Source:
-`Security Log`
-
-TraceUSB can now collect recent process creation events using Windows Security Auditing.
-
-Collected data:
-
-* Executable name
-* Full executable path
-* Parent process
-* Execution timestamp
-
-Additional correlation:
-
-* Detection of processes executed directly from removable drives
-* Timeline integration with USB activity and Defender events
-
-Examples:
-
-```text
-USB connected
-↓
-loader.exe executed from E:\
-↓
-Defender configuration changed
-↓
-USB removed
+The report is structured into sections for easier forensic review.
+
+Current sections include:
+
+* Log clearing events
+* USB activity
+* Connected-only USB devices
+* Active USB devices
+* Windows Defender events
+* Correlated executions
+* Runtime overlay detections
+* Behavioral timeline reconstruction
 
 ---
 
 ## Data Sources
 
+TraceUSB relies exclusively on native Windows telemetry sources.
+
+Sources currently used:
+
 * `Get-WinEvent`
 * `Get-PnpDevice`
 * `Get-PnpDeviceProperty`
+* `Get-Process`
 * `auditpol`
+* BAM registry entries
+* Windows Prefetch
+* Windows Security Auditing
 
-No external dependencies.
+No external dependencies are required.
 
 ---
 
 ## Privacy & Security
 
-TraceUSB is **fully local and non-invasive**.
+TraceUSB is fully local and non-invasive.
 
-It does NOT:
+The tool does NOT:
 
+* Upload data
 * Read personal files
-* Access file contents
 * Collect credentials
-* Monitor network activity
-* Send any data externally
+* Access file contents
+* Monitor network traffic
+* Communicate externally
 
-It only reads:
-
-* System event metadata
-* USB device metadata
+Only metadata and forensic telemetry are analyzed.
 
 No data leaves the machine.
 
@@ -261,7 +257,7 @@ No data leaves the machine.
 
 * Windows 10 / 11
 * PowerShell 5.1+
-* Standard user permissions
+* Administrative privileges recommended
 
 ---
 
@@ -295,47 +291,32 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
 
 ```powershell
 irm https://raw.githubusercontent.com/fckapplications/traceusb/main/TraceUSB.ps1 -OutFile traceusb.ps1
+
 powershell -ExecutionPolicy Bypass -File traceusb.ps1
 ```
 
 ---
 
-## Output Structure
-
-The report is divided into:
-
-* Log clearing events
-* USB (connected and removed)
-* USB (only connected)
-* Active USB devices
-* Windows Defender detections
-* Windows Defender configuration & failures
-* Windows Defender status changes
-* Process execution events
-* Removable drive execution correlation
-* Behavioral timeline reconstruction
-
----
-
 ## Limitations
 
-* Not all USB devices expose timestamps
-* Data depends on drivers and Windows internals
-* Does not reconstruct full activity sessions
-* Event ID 4688 depends on Windows Security Auditing availability
-* Some systems may restrict Security Log access without administrative privileges
+* Some USB devices do not expose timestamps
+* Event ID 4688 depends on Security Auditing availability
+* Some systems restrict Security Log access
+* Runtime overlays vary between GPU vendors
+* Some private overlays intentionally evade visibility
+* Correlation depends on Windows artifact availability
 
 ---
 
 ## Project Structure
 
-```
+```text
 .
 ├── TraceUSB.ps1
 ├── README.md
+├── CHANGELOG.md
 ├── LICENSE
-├── .gitignore
-└── CHANGELOG.md
+└── .gitignore
 ```
 
 ---
@@ -344,19 +325,21 @@ The report is divided into:
 
 Contributions are welcome:
 
-* Parsing improvements
-* New event sources
-* Performance optimizations
+* New telemetry sources
+* Better correlation logic
+* Performance improvements
+* Contextual filtering improvements
 
 ---
 
 ## Disclaimer
 
-This tool is intended for:
+TraceUSB is intended for:
 
-* Educational use
 * Local diagnostics
+* Educational purposes
 * System auditing
+* Forensic visibility
 
 Use responsibly.
 
@@ -365,3 +348,6 @@ Use responsibly.
 ## License
 
 MIT License
+
+```
+```

@@ -10,6 +10,33 @@ $result = New-Object System.Collections.Generic.List[string]
 $timeline = @()
 
 # ======================================
+# TRUST / CONTEXT FILTERS
+# ======================================
+
+$knownPublishers = @(
+    "Microsoft",
+    "Google",
+    "Mozilla",
+    "Valve",
+    "Discord",
+    "NVIDIA",
+    "Advanced Micro Devices",
+    "OBS",
+    "Logitech",
+    "Corsair",
+    "RivaTuner",
+    "SteelSeries"
+)
+
+$knownSafePaths = @(
+    "C:\Windows",
+    "C:\Program Files",
+    "C:\Program Files (x86)"
+)
+
+$correlatedExecutions = @{}
+
+# ======================================
 # HABILITAR AUDITORIA DE PROCESSOS (4688)
 # ======================================
 
@@ -93,6 +120,51 @@ function Test-RemovablePath {
     catch {}
 
     return $false
+}
+
+function Get-FileTrustInfo {
+
+    param($path)
+
+    $trusted = $false
+    $publisher = "UNKNOWN"
+    $signed = $false
+
+    try {
+
+        if (Test-Path $path) {
+
+            $sig = Get-AuthenticodeSignature $path
+
+            if ($sig) {
+
+                if ($sig.Status -eq "Valid") {
+                    $signed = $true
+                }
+
+                if ($sig.SignerCertificate) {
+
+                    $publisher = $sig.SignerCertificate.Subject
+
+                    foreach ($pub in $knownPublishers) {
+
+                        if ($publisher -match $pub) {
+                            $trusted = $true
+                            break
+                        }
+                    }
+                }
+            }
+        }
+
+    }
+    catch {}
+
+    return [PSCustomObject]@{
+        Signed = $signed
+        Trusted = $trusted
+        Publisher = $publisher
+    }
 }
 
 # ======================================
@@ -403,25 +475,16 @@ catch {
 }
 
 # ======================================
-# 10. PREFETCH RELEVANTE
+# 10. EXECUCOES CORRELACIONADAS
 # ======================================
 
-Write-Section "PREFETCH RELEVANTE"
+Write-Section "EXECUCOES CORRELACIONADAS"
+
+# ======================================
+# PREFETCH
+# ======================================
 
 $prefetchPath = "C:\Windows\Prefetch"
-
-# Padrões interessantes
-$suspiciousPatterns = @(
-    "TEMP",
-    "TMP",
-    "SETUP",
-    "UPDATE",
-    "UPDATER",
-    "INSTALL",
-    "PATCH",
-    "_UNINS",
-    "LOADER"
-)
 
 if (Test-Path $prefetchPath) {
 
@@ -429,98 +492,50 @@ if (Test-Path $prefetchPath) {
     Where-Object {
         $_.LastWriteTime -ge (Get-Date).AddHours(-24)
     } |
-    Sort-Object LastWriteTime -Descending |
     ForEach-Object {
 
         $exeName = ($_.BaseName -replace "-.*", "").ToUpper()
 
-        $isRelevant = $false
+        if (-not $correlatedExecutions.ContainsKey($exeName)) {
 
-        # Nome altamente randomizado
+            $correlatedExecutions[$exeName] = [PSCustomObject]@{
+                Name = $exeName
+                Sources = @("PREFETCH")
+                LastSeen = $_.LastWriteTime
+                Suspicious = $false
+            }
+        }
+        else {
+
+            $correlatedExecutions[$exeName].Sources += "PREFETCH"
+        }
+
+        # Nome randomizado
         if ($exeName -match '^[A-Z0-9]{10,}$') {
-            $isRelevant = $true
+            $correlatedExecutions[$exeName].Suspicious = $true
         }
 
-        # Caracteres unicode / idiomas diferentes
-        elseif ($exeName -match '[^\u0000-\u007F]') {
-            $isRelevant = $true
+        # Unicode
+        if ($exeName -match '[^\u0000-\u007F]') {
+            $correlatedExecutions[$exeName].Suspicious = $true
         }
 
-        # TMP / transient loaders
-        elseif (
+        # TMP / loaders
+        if (
             $exeName.Contains("TMP") -or
             $exeName.Contains("_UNINS") -or
             $exeName.Contains("LOADER")
         ) {
-            $isRelevant = $true
+            $correlatedExecutions[$exeName].Suspicious = $true
         }
-
-        $isKnownNoise = $false
-
-        foreach ($noise in $knownTransitionalNoise) {
-
-        if ($exeName.Contains($noise)) {
-        $isKnownNoise = $true
-        break
-        }
-        }
-
-        if ($isKnownNoise) {
-        return
-        }
-
-        # Padrões transitórios
-        foreach ($pattern in $suspiciousPatterns) {
-
-            if ($exeName.Contains($pattern)) {
-                $isRelevant = $true
-                break
-            }
-        }
-
-        if (-not $isRelevant) {
-            return
-        }
-
-        $result.Add("[!] Execucao relevante detectada")
-        $result.Add("Executavel: $exeName")
-        $result.Add("Ultima execucao: $($_.LastWriteTime)")
-        $result.Add("Arquivo: $($_.Name)")
-        $result.Add("")
-
-        Add-TimelineEvent `
-            -Time $_.LastWriteTime `
-            -Tipo "PREFETCH" `
-            -Evento "Execucao relevante registrada" `
-            -Detalhes $exeName
     }
 }
 
 # ======================================
-# 11. BAM (EXECUCOES RECENTES)
+# BAM
 # ======================================
 
-Write-Section "BAM (EXECUCOES RECENTES)"
-
 $bamPath = "HKLM:\System\CurrentControlSet\Services\bam\State\UserSettings"
-
-# Ignorar ruido do sistema
-$bamIgnore = @(
-    "SVCHOST",
-    "CONHOST",
-    "RUNDLL32",
-    "DWM",
-    "TASKHOSTW",
-    "DLLHOST",
-    "SEARCHHOST",
-    "SEARCHFILTERHOST",
-    "SEARCHPROTOCOLHOST",
-    "STARTMENUEXPERIENCEHOST",
-    "SHELLEXPERIENCEHOST",
-    "CTFMON",
-    "EXPLORER",
-    "CONSENT"
-)
 
 if (Test-Path $bamPath) {
 
@@ -535,70 +550,22 @@ if (Test-Path $bamPath) {
 
                 $name = $property.Name
 
-                # Apenas executáveis e apps relevantes
-                if (
-                    $name -match "\.exe" -or
-                    $name -match "Microsoft\."
-                ) {
+                if ($name -match "\.exe") {
 
-                    # Nome amigável
-                    $displayName = Split-Path $name -Leaf
+                    $exe = (Split-Path $name -Leaf).ToUpper()
 
-                    if (-not $displayName) {
-                        $displayName = $name
-                    }
+                    if (-not $correlatedExecutions.ContainsKey($exe)) {
 
-                    $displayUpper = $displayName.ToUpper()
-
-                    # Ignorar ruído
-                    $skip = $false
-
-                    foreach ($ignored in $bamIgnore) {
-
-                        if ($displayUpper.StartsWith($ignored)) {
-                            $skip = $true
-                            break
+                        $correlatedExecutions[$exe] = [PSCustomObject]@{
+                            Name = $exe
+                            Sources = @("BAM")
+                            LastSeen = Get-Date
+                            Suspicious = $false
                         }
                     }
+                    else {
 
-                    if ($skip) {
-                        continue
-                    }
-
-                    # Timestamp BAM
-                    $bamTime = $null
-
-                    try {
-
-                        if ($property.Value.Length -ge 8) {
-
-                            $fileTime = [BitConverter]::ToInt64(
-                                $property.Value,
-                                0
-                            )
-
-                            $bamTime = [datetime]::FromFileTime($fileTime)
-                        }
-
-                    }
-                    catch {}
-
-                    $result.Add("Executavel: $displayName")
-
-                    if ($bamTime) {
-                        $result.Add("Ultima execucao: $bamTime")
-                    }
-
-                    $result.Add("Origem: $name")
-                    $result.Add("")
-
-                    if ($bamTime) {
-
-                        Add-TimelineEvent `
-                            -Time $bamTime `
-                            -Tipo "BAM" `
-                            -Evento "Execucao registrada no BAM" `
-                            -Detalhes $displayName
+                        $correlatedExecutions[$exe].Sources += "BAM"
                     }
                 }
             }
@@ -609,45 +576,176 @@ if (Test-Path $bamPath) {
 }
 
 # ======================================
-# 12. ARTIFACTS RECENTES
+# OUTPUT FINAL
 # ======================================
 
-Write-Section "ARTIFACTS RECENTES"
+foreach ($entry in $correlatedExecutions.Values) {
 
-$artifactPaths = @(
-    "$env:USERPROFILE\Downloads",
-    "$env:TEMP",
-    "$env:LOCALAPPDATA\Temp"
-)
+    $sources = $entry.Sources | Select-Object -Unique
 
-foreach ($path in $artifactPaths) {
-
-    if (-not (Test-Path $path)) {
+    # Apenas correlacionados
+    if ($sources.Count -lt 2) {
         continue
     }
 
-    Get-ChildItem $path -Recurse -ErrorAction SilentlyContinue |
-    Where-Object {
-        -not $_.PSIsContainer -and
-        $_.LastWriteTime -ge (Get-Date).AddDays(-1) -and
-        (
-            $_.Extension -eq ".exe" -or
-            $_.Extension -eq ".dll"
-        )
-    } |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 50 |
-    ForEach-Object {
+    # Ignore executáveis muito comuns
+    $skip = $false
 
-        $result.Add("Arquivo: $($_.FullName)")
-        $result.Add("Ultima modificacao: $($_.LastWriteTime)")
+    foreach ($safe in $knownPublishers) {
+
+        if ($entry.Name -match $safe) {
+            $skip = $true
+            break
+        }
+    }
+
+    if ($skip) {
+        continue
+    }
+
+    $pathTrusted = $false
+
+foreach ($safePath in $knownSafePaths) {
+
+    if ($entry.Path -like "$safePath*") {
+        $pathTrusted = $true
+        break
+    }
+}
+
+if ($pathTrusted -and -not $entry.Suspicious) {
+    continue
+}
+
+    $result.Add("[!] Execucao correlacionada detectada")
+    $result.Add("Executavel: $($entry.Name)")
+    $result.Add("Fontes: $($sources -join ', ')")
+    $result.Add("Ultima atividade: $($entry.LastSeen)")
+
+    if ($entry.Suspicious) {
+        $result.Add("Indicadores: Nome incomum/transitorio")
+    }
+
+    $result.Add("")
+
+    Add-TimelineEvent `
+        -Time $entry.LastSeen `
+        -Tipo "CORRELATION" `
+        -Evento "Execucao correlacionada" `
+        -Detalhes $entry.Name
+}
+
+# ======================================
+# 11. GPU RUNTIME DETECTION
+# ======================================
+
+Write-Section "GPU OVERLAY DETECTION"
+
+$nvidiaDetected = $false
+$amdDetected = $false
+
+# NVIDIA
+$nvidiaProcesses = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ProcessName -match "nvidia|nvcontainer|nvsphelper|shadowplay"
+}
+
+if ($nvidiaProcesses) {
+
+    $nvidiaDetected = $true
+
+    $result.Add("[+] NVIDIA overlay/runtime detectado")
+    $result.Add("Processos detectados:")
+
+$nvidiaProcesses |
+Select-Object -ExpandProperty ProcessName -Unique |
+ForEach-Object {
+    $result.Add(" - $_")
+}
+
+$result.Add("")
+
+    Add-TimelineEvent `
+        -Time (Get-Date) `
+        -Tipo "GPU" `
+        -Evento "NVIDIA overlay detectado" `
+        -Detalhes "ShadowPlay / NVIDIA runtime ativo"
+}
+
+# AMD
+$amdProcesses = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ProcessName -match "radeon|amdow|amdrsserv|relive"
+}
+
+if ($amdProcesses) {
+
+    $amdDetected = $true
+
+    $result.Add("[+] AMD overlay/runtime detectado")
+    $result.Add("Processos detectados:")
+
+$amdProcesses |
+Select-Object -ExpandProperty ProcessName -Unique |
+ForEach-Object {
+    $result.Add(" - $_")
+}
+
+$result.Add("")
+
+    Add-TimelineEvent `
+        -Time (Get-Date) `
+        -Tipo "GPU" `
+        -Evento "AMD overlay detectado" `
+        -Detalhes "AMD ReLive / Radeon runtime ativo"
+}
+
+if (-not $nvidiaDetected -and -not $amdDetected) {
+
+    $result.Add("Nenhum overlay NVIDIA/AMD detectado.")
+    $result.Add("")
+}
+
+# ======================================
+# 12. GPU SCREENSHOT TRIGGER
+# ======================================
+
+if ($nvidiaDetected -or $amdDetected) {
+
+    $result.Add("[*] Preparando captura automatica...")
+    $result.Add("Retorne ao jogo imediatamente.")
+    $result.Add("")
+
+    Add-Type -AssemblyName System.Windows.Forms
+
+    Start-Sleep -Seconds 15
+
+    # NVIDIA
+    if ($nvidiaDetected) {
+
+        [System.Windows.Forms.SendKeys]::SendWait("%{F1}")
+
+        $result.Add("[+] Trigger NVIDIA ALT+F1 enviada")
         $result.Add("")
 
         Add-TimelineEvent `
-            -Time $_.LastWriteTime `
-            -Tipo "ARTIFACT" `
-            -Evento "Arquivo recente" `
-            -Detalhes $_.FullName
+            -Time (Get-Date) `
+            -Tipo "GPU" `
+            -Evento "NVIDIA screenshot trigger" `
+            -Detalhes "ALT+F1"
+    }
+
+    # AMD
+    elseif ($amdDetected) {
+
+        [System.Windows.Forms.SendKeys]::SendWait("^+i")
+
+        $result.Add("[+] Trigger AMD CTRL+SHIFT+I enviada")
+        $result.Add("")
+
+        Add-TimelineEvent `
+            -Time (Get-Date) `
+            -Tipo "GPU" `
+            -Evento "AMD screenshot trigger" `
+            -Detalhes "CTRL+SHIFT+I"
     }
 }
 

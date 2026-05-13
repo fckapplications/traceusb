@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.4.0] - Correlated Execution Intelligence & Runtime Detection
+
+### Added
+- Correlated execution analysis (BAM + Prefetch)
+- Execution context filtering system
+- Publisher trust filtering
+- Suspicious executable name heuristics
+- Runtime GPU overlay detection
+- NVIDIA runtime detection
+- AMD Radeon/ReLive runtime detection
+- Automatic NVIDIA screenshot trigger (ALT + F1)
+- Automatic AMD screenshot trigger (CTRL + SHIFT + I)
+- Overlay/runtime process visibility
+- Timeline integration for runtime detections
+
+### Improved
+- Massive reduction of Prefetch noise
+- Massive reduction of BAM noise
+- Better focus on suspicious executions only
+- Stronger behavioral correlation
+- Cleaner forensic output
+- Better contextual relevance for investigations
+
+### Changed
+- TraceUSB now prioritizes correlated behavioral evidence instead of raw artifact dumping
+- Artifact analysis became context-oriented instead of enumeration-oriented
+
+---
+
 ## [1.3.0] - Process Correlation & Behavioral Timeline
 
 ### Added
