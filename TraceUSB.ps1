@@ -63,20 +63,32 @@ param(
     [switch]$DisableBrowserHistoryScan,
 
     [string[]]$BrowserHistoryKeywords = @(
+        "ciroscript",
+        "project cheats",
+        "byster",
+        "crooked",
         "scum cheat",
         "scum hack",
         "scum esp",
         "scum aimbot",
         "scum script",
-        "ciroscript",
-        "project cheats",
-        "byster",
-        "crooked",
         "lag switch",
         "fake lag",
         "clumsy",
         "windivert",
-        "battleye bypass"
+        "battleye bypass",
+        "wallhack",
+        "aimbot",
+        "trainer",
+        "bypass",
+        "macro",
+        "cheats",
+        "cheat",
+        "hacks",
+        "hack",
+        "script",
+        "scum",
+        "esp"
     ),
 
     [ValidateRange(1, 365)]
@@ -1472,9 +1484,9 @@ function Redact-Url {
         $path = $uri.AbsolutePath
         if (-not $path) { $path = "/" }
         if ($uri.Query) {
-            return "$($uri.Scheme)://$($uri.Host)$path?query_redacted=true"
+            return ("{0}://{1}{2}?query_redacted=true" -f $uri.Scheme, $uri.Authority, $path)
         }
-        return "$($uri.Scheme)://$($uri.Host)$path"
+        return ("{0}://{1}{2}" -f $uri.Scheme, $uri.Authority, $path)
     }
     catch {
         return ($Url -replace '\?.*$', '?query_redacted=true')
@@ -1493,21 +1505,69 @@ function Limit-HistoryText {
     return $clean.Substring(0, $MaxLength - 3) + "..."
 }
 
+function Normalize-HistoryMatchText {
+    param([string]$Text)
+
+    if (-not $Text) { return "" }
+
+    try {
+        $Text = [System.Net.WebUtility]::UrlDecode($Text)
+    }
+    catch {}
+
+    $Text = $Text.ToLowerInvariant()
+    $Text = $Text -replace '\+', ' '
+    $Text = $Text -replace '[^a-z0-9]+', ' '
+    $Text = $Text -replace '\s+', ' '
+    return $Text.Trim()
+}
+
 function Find-BrowserHistoryKeyword {
     param(
         [string]$Url,
-        [string]$Title
+        [string]$Title,
+        [string]$SearchTerm
     )
 
-    $haystack = "$Url $Title"
+    $haystack = Normalize-HistoryMatchText "$Url $Title $SearchTerm"
     foreach ($keyword in $BrowserHistoryKeywords) {
         if (-not $keyword) { continue }
-        if ($haystack -match [regex]::Escape($keyword)) {
+        $normalizedKeyword = Normalize-HistoryMatchText $keyword
+        if (-not $normalizedKeyword) { continue }
+
+        if ($haystack -match "(^| )$([regex]::Escape($normalizedKeyword))( |$)") {
             return $keyword
+        }
+
+        $tokens = @($normalizedKeyword -split ' ' | Where-Object { $_ })
+        if ($tokens.Count -gt 1) {
+            $allTokensPresent = $true
+            foreach ($token in $tokens) {
+                if ($haystack -notmatch "(^| )$([regex]::Escape($token))( |$)") {
+                    $allTokensPresent = $false
+                    break
+                }
+            }
+            if ($allTokensPresent) { return $keyword }
         }
     }
 
     return $null
+}
+
+function Get-BrowserHistoryKeywordPriority {
+    param([string]$Keyword)
+
+    $normalized = Normalize-HistoryMatchText $Keyword
+    if (-not $normalized) { return 0 }
+    if ($normalized -match 'ciroscript|project cheats|byster|crooked') { return 100 }
+    if ($normalized -match 'scum (cheat|hack|esp|aimbot|script)') { return 95 }
+    if ($normalized -match 'lag switch|fake lag|clumsy|windivert|battleye bypass') { return 90 }
+    if ($normalized -match 'aimbot|wallhack|trainer|bypass|macro') { return 80 }
+    if ($normalized -match 'cheat|cheats|hack|hacks|script') { return 70 }
+    if ($normalized -eq 'esp') { return 60 }
+    if ($normalized -eq 'scum') { return 25 }
+    return 50
 }
 
 function Invoke-SqliteCsv {
@@ -1528,6 +1588,63 @@ function Invoke-SqliteCsv {
     }
 }
 
+function Escape-SqlLikeLiteral {
+    param([string]$Text)
+
+    if (-not $Text) { return "" }
+    return ($Text -replace "'", "''")
+}
+
+function Get-BrowserHistorySqlFilter {
+    param([string]$Expression)
+
+    $terms = New-Object System.Collections.Generic.List[string]
+    foreach ($keyword in $BrowserHistoryKeywords) {
+        $normalized = Normalize-HistoryMatchText $keyword
+        if (-not $normalized) { continue }
+        foreach ($token in @($normalized -split ' ' | Where-Object { $_ -and $_.Length -ge 3 })) {
+            if (-not $terms.Contains($token)) { $terms.Add($token) }
+        }
+    }
+
+    if ($terms.Count -eq 0) { return "1=1" }
+
+    $parts = @(
+        $terms |
+            ForEach-Object {
+                "$Expression LIKE '%$(Escape-SqlLikeLiteral $_)%'"
+            }
+    )
+    return "(" + ($parts -join " OR ") + ")"
+}
+
+function Invoke-SqliteTsv {
+    param(
+        [string]$SqlitePath,
+        [string]$DatabasePath,
+        [string]$Query,
+        [string[]]$Columns
+    )
+
+    $output = & $SqlitePath -readonly -separator "`t" $DatabasePath $Query 2>$null
+    if (-not $output) { return @() }
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($line in @($output)) {
+        if ($null -eq $line -or $line -eq "") { continue }
+        $values = [string]$line -split "`t", $Columns.Count
+        $row = [ordered]@{}
+        for ($i = 0; $i -lt $Columns.Count; $i++) {
+            $value = ""
+            if ($i -lt $values.Count) { $value = $values[$i] }
+            $row[$Columns[$i]] = $value
+        }
+        $rows.Add([PSCustomObject]$row)
+    }
+
+    return @($rows.ToArray())
+}
+
 function Get-BrowserProfileRoots {
     $roots = New-Object System.Collections.Generic.List[object]
     $seen = @{}
@@ -1541,9 +1658,20 @@ function Get-BrowserProfileRoots {
 
         $candidates = @(
             @{ Browser = "Chrome"; Root = Join-Path $LocalAppData "Google\Chrome\User Data" },
+            @{ Browser = "Chrome Beta"; Root = Join-Path $LocalAppData "Google\Chrome Beta\User Data" },
+            @{ Browser = "Chrome Dev"; Root = Join-Path $LocalAppData "Google\Chrome Dev\User Data" },
+            @{ Browser = "Chrome Canary"; Root = Join-Path $LocalAppData "Google\Chrome SxS\User Data" },
             @{ Browser = "Edge"; Root = Join-Path $LocalAppData "Microsoft\Edge\User Data" },
+            @{ Browser = "Edge Beta"; Root = Join-Path $LocalAppData "Microsoft\Edge Beta\User Data" },
+            @{ Browser = "Edge Dev"; Root = Join-Path $LocalAppData "Microsoft\Edge Dev\User Data" },
+            @{ Browser = "Edge Canary"; Root = Join-Path $LocalAppData "Microsoft\Edge SxS\User Data" },
             @{ Browser = "Brave"; Root = Join-Path $LocalAppData "BraveSoftware\Brave-Browser\User Data" },
+            @{ Browser = "Chromium"; Root = Join-Path $LocalAppData "Chromium\User Data" },
+            @{ Browser = "Vivaldi"; Root = Join-Path $LocalAppData "Vivaldi\User Data" },
+            @{ Browser = "Yandex"; Root = Join-Path $LocalAppData "Yandex\YandexBrowser\User Data" },
+            @{ Browser = "Arc"; Root = Join-Path $LocalAppData "Packages\TheBrowserCompany.Arc_ttt1ap7aakyb4\LocalCache\Local\Arc\User Data" },
             @{ Browser = "Opera"; Root = Join-Path $RoamingAppData "Opera Software\Opera Stable"; Opera = $true },
+            @{ Browser = "Opera GX"; Root = Join-Path $RoamingAppData "Opera Software\Opera GX Stable"; Opera = $true },
             @{ Browser = "Firefox"; Root = Join-Path $RoamingAppData "Mozilla\Firefox\Profiles"; Firefox = $true }
         )
 
@@ -1796,10 +1924,11 @@ function Get-FilteredHistoryLines {
     $tempRoot = Join-Path $env:TEMP ("TraceUSB-history-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     $readableDatabases = 0
+    $internalMaxHistoryHits = [Math]::Max($BrowserHistoryMaxHits * 5, 500)
 
     try {
         foreach ($db in $databases) {
-            if ($script:FilteredHistoryHits.Count -ge $BrowserHistoryMaxHits) { break }
+            if ($script:FilteredHistoryHits.Count -ge $internalMaxHistoryHits) { break }
 
             $copyPath = Join-Path $tempRoot ("history_" + [guid]::NewGuid().ToString("N") + ".sqlite")
             if (-not (Copy-BrowserHistoryDatabase -Database $db -Destination $copyPath)) {
@@ -1808,33 +1937,58 @@ function Get-FilteredHistoryLines {
             }
             $readableDatabases++
 
+            $queries = New-Object System.Collections.Generic.List[object]
             if ($db.Type -eq "Chromium") {
-                $query = "SELECT datetime((visits.visit_time/1000000)-11644473600,'unixepoch','localtime') AS visit_time, urls.url AS url, urls.title AS title FROM urls JOIN visits ON urls.id=visits.url WHERE visits.visit_time >= ((strftime('%s','now') - ($BrowserHistoryLookbackDays*86400) + 11644473600)*1000000) ORDER BY visits.visit_time DESC LIMIT 5000;"
+                $historyExpression = "lower(urls.url || ' ' || ifnull(urls.title,''))"
+                $historyFilter = Get-BrowserHistorySqlFilter -Expression $historyExpression
+                $searchExpression = "lower(keyword_search_terms.term || ' ' || keyword_search_terms.normalized_term || ' ' || urls.url || ' ' || ifnull(urls.title,''))"
+                $searchFilter = Get-BrowserHistorySqlFilter -Expression $searchExpression
+                $queries.Add([PSCustomObject]@{
+                    Source = "History"
+                    Sql = "SELECT datetime((visits.visit_time/1000000)-11644473600,'unixepoch','localtime') AS visit_time, urls.url AS url, replace(replace(ifnull(urls.title,''), char(10), ' '), char(13), ' ') AS title, '' AS search_term FROM urls JOIN visits ON urls.id=visits.url WHERE visits.visit_time >= ((strftime('%s','now') - ($BrowserHistoryLookbackDays*86400) + 11644473600)*1000000) AND $historyFilter ORDER BY visits.visit_time DESC LIMIT 30000;"
+                })
+                $queries.Add([PSCustomObject]@{
+                    Source = "SearchTerms"
+                    Sql = "SELECT datetime((urls.last_visit_time/1000000)-11644473600,'unixepoch','localtime') AS visit_time, urls.url AS url, replace(replace(ifnull(urls.title,''), char(10), ' '), char(13), ' ') AS title, replace(replace(ifnull(keyword_search_terms.term,''), char(10), ' '), char(13), ' ') AS search_term FROM keyword_search_terms JOIN urls ON urls.id=keyword_search_terms.url_id WHERE urls.last_visit_time >= ((strftime('%s','now') - ($BrowserHistoryLookbackDays*86400) + 11644473600)*1000000) AND $searchFilter ORDER BY urls.last_visit_time DESC LIMIT 10000;"
+                })
             }
             else {
-                $query = "SELECT datetime(moz_historyvisits.visit_date/1000000,'unixepoch','localtime') AS visit_time, moz_places.url AS url, moz_places.title AS title FROM moz_places JOIN moz_historyvisits ON moz_places.id=moz_historyvisits.place_id WHERE moz_historyvisits.visit_date >= ((strftime('%s','now') - ($BrowserHistoryLookbackDays*86400))*1000000) ORDER BY moz_historyvisits.visit_date DESC LIMIT 5000;"
+                $firefoxExpression = "lower(moz_places.url || ' ' || ifnull(moz_places.title,''))"
+                $firefoxFilter = Get-BrowserHistorySqlFilter -Expression $firefoxExpression
+                $queries.Add([PSCustomObject]@{
+                    Source = "History"
+                    Sql = "SELECT datetime(moz_historyvisits.visit_date/1000000,'unixepoch','localtime') AS visit_time, moz_places.url AS url, replace(replace(ifnull(moz_places.title,''), char(10), ' '), char(13), ' ') AS title, '' AS search_term FROM moz_places JOIN moz_historyvisits ON moz_places.id=moz_historyvisits.place_id WHERE moz_historyvisits.visit_date >= ((strftime('%s','now') - ($BrowserHistoryLookbackDays*86400))*1000000) AND $firefoxFilter ORDER BY moz_historyvisits.visit_date DESC LIMIT 30000;"
+                })
             }
 
-            $rows = Invoke-SqliteCsv -SqlitePath $sqlite -DatabasePath $copyPath -Query $query
-            if ($rows.Count -eq 0) {
-                $lines.Add("Read $($db.Browser) [$($db.Profile)]: no rows returned in lookback window or SQLite query failed.")
-            }
+            foreach ($querySpec in $queries) {
+                if ($script:FilteredHistoryHits.Count -ge $internalMaxHistoryHits) { break }
 
-            foreach ($row in $rows) {
-                if ($script:FilteredHistoryHits.Count -ge $BrowserHistoryMaxHits) { break }
-
-                $keyword = Find-BrowserHistoryKeyword -Url $row.url -Title $row.title
-                if (-not $keyword) { continue }
-
-                $hit = [PSCustomObject]@{
-                    Browser = $db.Browser
-                    Profile = $db.Profile
-                    Time    = $row.visit_time
-                    Keyword = $keyword
-                    Url     = Redact-Url $row.url
-                    Title   = Limit-HistoryText $row.title
+                $rows = Invoke-SqliteTsv -SqlitePath $sqlite -DatabasePath $copyPath -Query $querySpec.Sql -Columns @("visit_time", "url", "title", "search_term")
+                if ($rows.Count -eq 0) {
+                    $lines.Add("Read $($db.Browser) [$($db.Profile)] $($querySpec.Source): no rows returned in lookback window or SQLite query failed.")
                 }
-                $script:FilteredHistoryHits.Add($hit)
+
+                foreach ($row in $rows) {
+                    if ($script:FilteredHistoryHits.Count -ge $internalMaxHistoryHits) { break }
+
+                    $keyword = Find-BrowserHistoryKeyword -Url $row.url -Title $row.title -SearchTerm $row.search_term
+                    if (-not $keyword) { continue }
+                    $priority = Get-BrowserHistoryKeywordPriority $keyword
+
+                    $hit = [PSCustomObject]@{
+                        Browser    = $db.Browser
+                        Profile    = $db.Profile
+                        Source     = $querySpec.Source
+                        Time       = $row.visit_time
+                        Keyword    = $keyword
+                        SearchTerm = Limit-HistoryText $row.search_term
+                        Url        = Redact-Url $row.url
+                        Title      = Limit-HistoryText $row.title
+                        Priority   = $priority
+                    }
+                    $script:FilteredHistoryHits.Add($hit)
+                }
             }
         }
     }
@@ -1848,14 +2002,34 @@ function Get-FilteredHistoryLines {
         return @($lines)
     }
 
-    $lines.Add("Matches: $($script:FilteredHistoryHits.Count)")
+    $selectedHistoryHits = @(
+        $script:FilteredHistoryHits |
+            Sort-Object -Property Priority, Time -Descending |
+            Select-Object -First $BrowserHistoryMaxHits
+    )
+
+    if ($script:FilteredHistoryHits.Count -gt $selectedHistoryHits.Count) {
+        $matchScope = if ($script:FilteredHistoryHits.Count -ge $internalMaxHistoryHits) {
+            "$($script:FilteredHistoryHits.Count)+ collected before internal cap"
+        } else {
+            "$($script:FilteredHistoryHits.Count) found"
+        }
+        $lines.Add("Matches: $($selectedHistoryHits.Count) shown / $matchScope")
+        $lines.Add("Selection: higher-risk keywords are prioritized over generic SCUM-only hits.")
+    }
+    else {
+        $lines.Add("Matches: $($selectedHistoryHits.Count)")
+    }
     $lines.Add("")
 
-    foreach ($hit in $script:FilteredHistoryHits) {
+    foreach ($hit in $selectedHistoryHits) {
         $lines.Add("Browser: $($hit.Browser)")
         $lines.Add("Profile: $($hit.Profile)")
+        $lines.Add("Source: $($hit.Source)")
         $lines.Add("Time: $($hit.Time)")
         $lines.Add("Keyword: $($hit.Keyword)")
+        $lines.Add("Priority: $($hit.Priority)")
+        if ($hit.SearchTerm) { $lines.Add("SearchTerm: $($hit.SearchTerm)") }
         $lines.Add("URL: $($hit.Url)")
         if ($hit.Title) { $lines.Add("Title: $($hit.Title)") }
         $lines.Add("")

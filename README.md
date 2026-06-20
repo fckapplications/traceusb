@@ -339,9 +339,21 @@ browser checks.
 
 TraceUSB checks the current Windows profile and other accessible profiles under
 `C:\Users`, then copies browser databases to a temporary folder before querying
-them. The output lists detected Chrome/Edge/Brave/Opera/Firefox databases and
-records whether each database was readable. If no keyword matches are found, the
-file says so explicitly instead of implying that the browser was unsupported.
+them. The output lists detected databases and records whether each database was
+readable. If no keyword matches are found, the file says so explicitly instead
+of implying that the browser was unsupported.
+
+Chromium-family coverage includes Chrome Stable/Beta/Dev/Canary, Edge
+Stable/Beta/Dev/Canary, Brave, Chromium, Vivaldi, Opera, Opera GX, Yandex, and
+Arc when their Windows profile folders are present. Firefox profiles are scanned
+separately.
+
+For Chromium browsers, TraceUSB queries both normal visit history and
+`keyword_search_terms`, which catches many searches that do not appear cleanly in
+page titles. URL/title/search text is normalized before matching, so
+`scum+cheat`, `scum%20cheat`, and `SCUM Cheat` are treated consistently. The
+result list prioritizes stronger keywords such as `ciroscript`, `project
+cheats`, `scum cheat`, `aimbot`, and `wallhack` above broad `scum`-only hits.
 
 Supported targets:
 

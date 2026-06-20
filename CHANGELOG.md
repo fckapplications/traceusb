@@ -37,6 +37,7 @@
 - Discord embeds now use a review-priority model and source/category coverage summary instead of showing only the highest raw scores.
 - `-NoOpen` is now opt-in again; local TXT reports open by default after a normal run.
 - Browser-history discovery now scans accessible `C:\Users` profiles, reports detected databases, and distinguishes "no keyword matches" from "no database found".
+- Browser-history matching now normalizes URL/title/search text, queries Chromium `keyword_search_terms`, supports more Chromium-family browsers, and prioritizes high-risk keywords over generic SCUM-only hits.
 
 ### Fixed
 - Timeline events are added through a functional helper.
@@ -44,6 +45,8 @@
 - Publisher/signature trust is used during scoring when a real path is available.
 - Fixed Discord attachment iteration/counting so multipart uploads include the prepared files.
 - Fixed browser-history discovery that could miss installed Chrome/Firefox profiles.
+- Fixed browser-history parsing that could miss matches because of sqlite CSV output and URL-encoded search text.
+- Fixed redacted URLs with query strings being rendered as malformed `=true` suffixes.
 
 ---
 
