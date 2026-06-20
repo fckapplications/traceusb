@@ -1,255 +1,334 @@
 # TraceUSB
 
-Lightweight Windows USB and execution intelligence analyzer with local-only forensic output.
+Lightweight Windows forensic analyzer for USB activity, process execution, runtime context, and security-relevant event correlation.
+
+TraceUSB is built for local review of possible suspicious runtime behavior around SCUM sessions while staying conservative: it collects native Windows metadata, correlates signals, and reports forensic relevance. It does not decide that a player cheated.
 
 ---
 
-## Overview
+## What It Does
 
-TraceUSB is a PowerShell-based forensic utility designed to extract objective Windows telemetry related to:
+TraceUSB analyzes local Windows telemetry from:
 
-- USB device activity
-- Process execution
-- Runtime overlays
-- Windows Defender events
-- Behavioral correlation
+* USB Plug and Play metadata
+* Windows Security process creation events (`4688`)
+* Microsoft Defender operational events
+* BAM execution artifacts
+* Windows Prefetch artifacts
+* Windows event log clearing signals
+* Service and driver installation events (`7045`)
+* Common GPU and overlay runtime processes
 
-The project focuses on:
-
-- Low-noise forensic visibility
-- Correlated execution evidence
-- Context-aware analysis
-- Chronological reconstruction
-- Human-readable output
-
-Instead of dumping every available artifact, TraceUSB prioritizes suspicious and behaviorally relevant activity.
-
-All analysis is performed locally using native Windows telemetry sources.
+The report prioritizes correlated, explainable evidence instead of dumping every artifact.
 
 ---
 
-## Core Capabilities
+## Safe Defaults
 
-### USB Analysis
+By default TraceUSB:
 
-TraceUSB can reconstruct USB-related activity using native Plug and Play telemetry.
+* Does not change Windows audit policy
+* Does not send GPU screenshot hotkeys
+* Does not open external network connections
+* Does not upload data
+* Does not inspect process memory
+* Does not read personal file contents
 
-Features include:
+Two sensitive actions are opt-in only:
 
-- USB connection timestamps
-- USB removal timestamps
-- Connected-only device detection
-- Active USB device snapshot
-- USB device type classification
-- USB session duration tracking
-
-Supported device categories:
-
-- Storage devices
-- HID/input devices
-- Audio devices
-- Generic USB peripherals
-
----
-
-### Windows Defender Visibility
-
-TraceUSB analyzes Microsoft Defender operational logs to identify security-relevant events.
-
-Supported Event IDs:
-
-| Event ID | Description |
-|---|---|
-| 1116 | Threat detected |
-| 1117 | Action taken |
-| 5001 | Defender disabled |
-| 5004 | Defender configuration modified |
-| 5010 | Defender engine failure |
-
-Collected data includes:
-
-- Detection timestamps
-- Threat names
-- File paths
-- Configuration modifications
-- Protection status changes
-
----
-
-### Process Execution Analysis
-
-TraceUSB supports behavioral reconstruction through Windows Security Auditing.
-
-Features include:
-
-- Process creation monitoring (4688)
-- Full executable path extraction
-- Parent/child process correlation
-- Execution timestamp visibility
-- Automatic Process Creation auditing enablement
-
-Additional visibility:
-
-- Executables launched from removable drives
-- Transitional executable detection
-- Short-lived execution visibility
-
----
-
-### Correlated Execution Intelligence
-
-Instead of independently dumping BAM, Prefetch, and process artifacts, TraceUSB now correlates execution evidence across multiple telemetry sources.
-
-Current correlation sources:
-
-- BAM
-- Windows Prefetch
-- Event ID 4688
-- Removable drive execution traces
-
-This dramatically reduces forensic noise and improves contextual relevance.
-
-Behavioral prioritization includes:
-
-- Randomized executable names
-- Transitional loaders
-- Temporary executables
-- Unusual execution paths
-- Multi-source execution correlation
-
----
-
-### Contextual Filtering
-
-TraceUSB uses contextual filtering to reduce common forensic noise.
-
-Implemented filtering layers include:
-
-- Known publisher filtering
-- Known-safe path filtering
-- Suspicious executable heuristics
-- Artifact prioritization
-- Noise reduction logic
-
-Known-safe publishers include:
-
-- Microsoft
-- Google
-- Valve
-- Discord
-- NVIDIA
-- AMD
-- Mozilla
-- OBS
-
-The goal is to surface operationally relevant events instead of overwhelming raw telemetry.
-
----
-
-### Runtime & Overlay Detection
-
-TraceUSB can identify active runtime overlay ecosystems commonly associated with GPU rendering environments.
-
-Supported runtime visibility:
-
-- NVIDIA ShadowPlay
-- AMD Radeon/ReLive
-- RTSS
-- MSI Afterburner
-- Overlay-based rendering runtimes
-
-Collected data:
-
-- Active runtime processes
-- Overlay-related modules
-- Runtime ecosystem visibility
-
-Additional capabilities:
-
-- NVIDIA screenshot trigger (ALT + F1)
-- AMD screenshot trigger (CTRL + SHIFT + I)
-
----
-
-## Timeline Reconstruction
-
-TraceUSB generates chronological forensic reconstruction using multiple event sources.
-
-Timeline correlation currently includes:
-
-- USB activity
-- Defender events
-- Process execution
-- Overlay/runtime detections
-- Correlated executions
-
-Generated output:
-
-```text
-Desktop\timeline.txt
-````
+* `-EnableAuditPolicy` enables Process Creation auditing with `auditpol`
+* `-EnableScreenshotTrigger` sends native NVIDIA/AMD screenshot hotkeys when runtime context is present
 
 ---
 
 ## Output
 
-TraceUSB generates:
+TraceUSB writes timestamped local files:
 
 ```text
-Desktop\analise.txt
-Desktop\timeline.txt
+Desktop\analise_yyyyMMdd_HHmmss.txt
+Desktop\timeline_yyyyMMdd_HHmmss.txt
 ```
 
-The report is structured into sections for easier forensic review.
+`analise.txt` is operator-readable.  
+`timeline.txt` is chronological.  
 
-Current sections include:
+When Discord reporting is used, TraceUSB builds these sensitive artifacts as
+Discord download attachments instead of saving them locally by default:
 
-* Log clearing events
-* USB activity
-* Connected-only USB devices
-* Active USB devices
-* Windows Defender events
-* Correlated executions
-* Runtime overlay detections
-* Behavioral timeline reconstruction
+```text
+evidence_yyyyMMdd_HHmmss.jsonl
+translations_yyyyMMdd_HHmmss.txt
+filtered_history_yyyyMMdd_HHmmss.txt
+```
+
+Use `-SaveDiscordAttachmentsLocal` only when you explicitly want those attachment
+files written to the local output folder.
+
+Each structured evidence item includes:
+
+* `Time`
+* `Category`
+* `Source`
+* `EventId`
+* `ExeName`
+* `Path`
+* `ParentPath`
+* `UserSid`
+* `Device`
+* `Confidence`
+* `Reasons`
+* `Details`
+
+Confidence means forensic relevance:
+
+* `70-100`: high relevance
+* `40-69`: medium relevance
+* `0-39`: low/context evidence
+
+It is not proof of cheating.
 
 ---
 
-## Data Sources
+## Usage
 
-TraceUSB relies exclusively on native Windows telemetry sources.
+Run an internal review with the configured Discord webhook:
 
-Sources currently used:
+```powershell
+.\TraceUSB.ps1
+```
 
-* `Get-WinEvent`
-* `Get-PnpDevice`
-* `Get-PnpDeviceProperty`
-* `Get-Process`
-* `auditpol`
-* BAM registry entries
-* Windows Prefetch
-* Windows Security Auditing
+By default this internal build:
 
-No external dependencies are required.
+* writes timestamped `analise_*.txt` and `timeline_*.txt` locally;
+* sends a Discord embed when a webhook is configured;
+* attaches `evidence_*.jsonl` and `translations_*.txt`;
+* runs the filtered browser-history scan and attaches `filtered_history_*.txt`;
+* does not open Notepad.
+
+Run without Discord or browser-history scanning:
+
+```powershell
+.\TraceUSB.ps1 -DisableDiscordWebhook -DisableBrowserHistoryScan
+```
+
+Write output to a custom folder:
+
+```powershell
+.\TraceUSB.ps1 -OutputDirectory C:\Temp\TraceUSB -NoOpen
+```
+
+Analyze a larger time window:
+
+```powershell
+.\TraceUSB.ps1 -LookbackHours 72 -NoOpen
+```
+
+Include low-confidence/context evidence in the readable report:
+
+```powershell
+.\TraceUSB.ps1 -IncludeLowConfidence -NoOpen
+```
+
+Opt in to enabling Security 4688 auditing:
+
+```powershell
+.\TraceUSB.ps1 -EnableAuditPolicy
+```
+
+Opt in to GPU screenshot hotkeys:
+
+```powershell
+.\TraceUSB.ps1 -EnableScreenshotTrigger
+```
+
+Create a Discord embed preview without sending anything:
+
+```powershell
+.\TraceUSB.ps1 -NoOpen -DiscordPreviewPath .\discord_preview.html
+```
+
+This writes a timestamped preview such as
+`discord_preview_yyyyMMdd_HHmmss.html`.
+
+Send a formatted Discord webhook with an explicit URL:
+
+```powershell
+.\TraceUSB.ps1 -DiscordWebhookUrl "https://discord.com/api/webhooks/..."
+```
+
+Save the Discord webhook locally with Windows DPAPI encryption:
+
+```powershell
+.\TraceUSB.ps1 `
+  -SaveDiscordWebhookSecret `
+  -DiscordWebhookUrl "https://discord.com/api/webhooks/..." `
+  -DiscordWebhookSecretPath "$env:APPDATA\TraceUSB\discord_webhook.secret"
+```
+
+Use the saved DPAPI secret:
+
+```powershell
+.\TraceUSB.ps1 `
+  -DiscordWebhookSecretPath "$env:APPDATA\TraceUSB\discord_webhook.secret"
+```
+
+Or use an environment variable instead of passing the URL on the command line:
+
+```powershell
+$env:TRACEUSB_DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/..."
+.\TraceUSB.ps1
+```
+
+Run Discord attachments and filtered browser-history scan explicitly:
+
+```powershell
+.\TraceUSB.ps1 `
+  -EnableDiscordWebhook `
+  -EnableBrowserHistoryScan `
+  -DiscordPreviewPath .\discord_preview.html
+```
+
+Save Discord attachments locally for debugging:
+
+```powershell
+.\TraceUSB.ps1 -NoOpen -DiscordPreviewPath .\discord_preview.html -SaveDiscordAttachmentsLocal
+```
+
+Customize Discord identity, title, colors, and number of findings:
+
+```powershell
+.\TraceUSB.ps1 -NoOpen `
+  -DiscordPreviewPath .\discord_preview.html `
+  -DiscordUsername "TraceUSB Audit" `
+  -DiscordTitle "SCUM endpoint review" `
+  -DiscordAlertColor "D64545" `
+  -DiscordNoticeColor "E0A33A" `
+  -DiscordInfoColor "4E7DD9" `
+  -DiscordMaxItems 10
+```
+
+Customize game/session anchors:
+
+```powershell
+.\TraceUSB.ps1 -GameProcessPatterns "SCUM.exe","SCUM-Win64-Shipping.exe","BEService.exe" -NoOpen
+```
 
 ---
 
-## Privacy & Security
+## Parameters
 
-TraceUSB is fully local and non-invasive.
+| Parameter | Default | Purpose |
+|---|---:|---|
+| `-LookbackHours` | `24` | Event and artifact lookback window |
+| `-OutputDirectory` | Desktop | Output folder |
+| `-NoOpen` | On | Prevents Notepad from opening outputs |
+| `-EnableAuditPolicy` | Off | Enables Process Creation auditing when running as admin |
+| `-EnableScreenshotTrigger` | Off | Sends native GPU screenshot hotkeys when runtime context exists |
+| `-IncludeLowConfidence` | Off | Includes low/context evidence in the readable report |
+| `-EnableDiscordWebhook` | On | Sends a Discord embed when a webhook source is configured |
+| `-DisableDiscordWebhook` | Off | Disables Discord posting for dry runs |
+| `-DiscordWebhookUrl` | Empty | Discord webhook endpoint |
+| `-DiscordWebhookSecretPath` | Empty | Reads a Windows DPAPI encrypted webhook secret |
+| `-DiscordWebhookEnvVar` | `TRACEUSB_DISCORD_WEBHOOK_URL` | Environment variable fallback for webhook URL |
+| `-SaveDiscordWebhookSecret` | Off | Saves `-DiscordWebhookUrl` to `-DiscordWebhookSecretPath` using DPAPI and exits |
+| `-DiscordPreviewPath` | Empty | Writes local HTML preview and matching JSON payload |
+| `-DiscordUsername` | `TraceUSB` | Webhook display name |
+| `-DiscordTitle` | TraceUSB summary | Embed title |
+| `-DiscordSubtitle` | Disclaimer | Embed description |
+| `-DiscordMaxItems` | `8` | Maximum findings in the embed |
+| `-DiscordAlertColor` | `D64545` | Embed border color for high confidence |
+| `-DiscordNoticeColor` | `E0A33A` | Embed border color for medium confidence |
+| `-DiscordInfoColor` | `4E7DD9` | Embed border color for low/context-only findings |
+| `-DiscordIncludeLowConfidence` | Off | Includes low-confidence evidence in Discord preview/webhook |
+| `-SaveDiscordAttachmentsLocal` | Off | Writes Discord attachment files locally for debugging |
+| `-SubjectLabel` | Empty | Adds a safe player label to generated artifact names |
+| `-EnableBrowserHistoryScan` | On | Enables keyword-only browser history scan |
+| `-DisableBrowserHistoryScan` | Off | Disables browser history scan |
+| `-BrowserHistoryKeywords` | SCUM cheat/fake-lag terms | Keyword list for filtered history |
+| `-BrowserHistoryLookbackDays` | `30` | Browser history lookback window |
+| `-BrowserHistoryMaxHits` | `100` | Maximum filtered history hits |
+| `-SQLiteCliPath` | Auto-detect | Optional path to `sqlite3.exe` |
+| `-NoRedactUrls` | Off | Keeps full matched URLs instead of redacting query strings |
+| `-GameProcessPatterns` | SCUM/BattlEye defaults | Process names used as temporal anchors |
 
-The tool does NOT:
+---
 
-* Upload data
-* Read personal files
-* Collect credentials
-* Access file contents
-* Monitor network traffic
-* Communicate externally
+## Discord Reporting
 
-Only metadata and forensic telemetry are analyzed.
+Discord reporting is enabled by default in this internal build. Posting still
+requires a webhook source. The webhook source can be `-DiscordWebhookUrl`,
+`-DiscordWebhookSecretPath`, a hardcoded direct URL in `-DiscordWebhookEnvVar`,
+or the configured environment variable. Use `-DisableDiscordWebhook` for dry
+runs.
 
-No data leaves the machine.
+The Discord embed summarizes findings and includes operator-friendly suggested
+translations. `evidence_*.jsonl`, `translations_*.txt`, and optional
+`filtered_history_*.txt` are sent as Discord download attachments below the
+embed. They are not saved locally unless `-SaveDiscordAttachmentsLocal` is used.
+For review before posting, use `-DiscordPreviewPath`; this writes:
+
+```text
+discord_preview_yyyyMMdd_HHmmss.html
+```
+
+The HTML file approximates Discord's embed layout, including the left border
+color chosen from the highest confidence finding.
+
+### Webhook Secret Storage
+
+`-SaveDiscordWebhookSecret` uses Windows DPAPI through PowerShell's
+`ConvertFrom-SecureString`. This prevents the webhook from being stored as plain
+text in the project or command history, but it is not a portable shared secret.
+The encrypted file can normally only be decrypted by the same Windows user
+profile on the same machine.
+
+If you need to distribute TraceUSB to players without exposing the Discord
+webhook, use a small server-side relay endpoint instead of embedding the real
+Discord URL in the script.
+
+---
+
+## Filtered Browser History
+
+Browser history scanning is enabled by default in this internal build. It is
+meant for consent-based reviews and only exports entries matching configured
+keywords. It does not dump full browser history. Use
+`-DisableBrowserHistoryScan` for dry runs or when the review does not include
+browser checks.
+
+Supported targets:
+
+* Chrome
+* Edge
+* Brave
+* Opera
+* Firefox
+
+TraceUSB reads browser history SQLite databases through `sqlite3.exe` when
+available. If SQLite is unavailable, the scan is skipped cleanly and noted in
+the report.
+
+URLs are redacted by default: query strings are replaced with
+`query_redacted=true`. Use `-NoRedactUrls` only when the review process
+explicitly allows full matched URLs.
+
+---
+
+## Correlation Model
+
+TraceUSB increases confidence when signals reinforce each other:
+
+* Executable appears in multiple sources
+* Execution occurs from a removable drive
+* Execution occurs near USB activity
+* Execution occurs near a SCUM/BattlEye session
+* Defender references the same path
+* Event logs are cleared near execution
+* Name or path looks transitional, random, temporary, or loader-like
+* Service or driver installation appears near the investigation window
+
+Confidence is reduced when an executable is signed by a known trusted publisher and runs from a trusted path such as `C:\Windows` or `C:\Program Files`.
 
 ---
 
@@ -257,97 +336,45 @@ No data leaves the machine.
 
 * Windows 10 / 11
 * PowerShell 5.1+
-* Administrative privileges recommended
+* Administrator privileges recommended for Security log access
 
----
-
-## Usage
-
-### Run locally
-
-```powershell
-.\TraceUSB.ps1
-```
-
----
-
-### Run remotely
-
-```powershell
-irm https://raw.githubusercontent.com/fckapplications/traceusb/main/TraceUSB.ps1 | iex
-```
-
----
-
-### Run with execution policy bypass
-
-```powershell
-powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/fckapplications/traceusb/main/TraceUSB.ps1 | iex"
-```
-
----
-
-### Safer method
-
-```powershell
-irm https://raw.githubusercontent.com/fckapplications/traceusb/main/TraceUSB.ps1 -OutFile traceusb.ps1
-
-powershell -ExecutionPolicy Bypass -File traceusb.ps1
-```
+No external runtime dependencies are required.
 
 ---
 
 ## Limitations
 
-* Some USB devices do not expose timestamps
-* Event ID 4688 depends on Security Auditing availability
-* Some systems restrict Security Log access
-* Runtime overlays vary between GPU vendors
-* Some private overlays intentionally evade visibility
-* Correlation depends on Windows artifact availability
+* Some systems do not retain all event sources.
+* Event ID `4688` depends on Security auditing being enabled before the activity occurred.
+* Prefetch may be disabled or unavailable.
+* BAM timestamps and paths vary by Windows version.
+* Runtime/overlay detection is context only and may miss private overlays.
+* TraceUSB does not inspect game memory, kernel memory, or network traffic.
 
 ---
 
-## Project Structure
+## Development
 
-```text
-.
-├── TraceUSB.ps1
-├── README.md
-├── CHANGELOG.md
-├── LICENSE
-└── .gitignore
+Run a syntax check:
+
+```powershell
+$tokens=$null;$errors=$null;[System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path .\TraceUSB.ps1),[ref]$tokens,[ref]$errors) | Out-Null; $errors
+```
+
+Run tests when Pester is available:
+
+```powershell
+Invoke-Pester .\tests
 ```
 
 ---
 
-## Contributing
+## Privacy
 
-Contributions are welcome:
-
-* New telemetry sources
-* Better correlation logic
-* Performance improvements
-* Contextual filtering improvements
+All analysis is local. TraceUSB does not communicate with external services and does not upload investigation data.
 
 ---
 
 ## Disclaimer
 
-TraceUSB is intended for:
-
-* Local diagnostics
-* Educational purposes
-* System auditing
-* Forensic visibility
-
-Use responsibly.
-
----
-
-## License
-
-MIT License
-
-```
-```
+TraceUSB is for local diagnostics, education, system auditing, and forensic visibility. Its output should be reviewed by a human operator and treated as indicators, not automatic proof of misconduct.

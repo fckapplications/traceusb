@@ -1,80 +1,45 @@
 # Changelog
 
-## [1.4.0] - Correlated Execution Intelligence & Runtime Detection
+## [1.5.0] - Forensic Correlation Worktree
 
 ### Added
-- Correlated execution analysis (BAM + Prefetch)
-- Execution context filtering system
-- Publisher trust filtering
-- Suspicious executable name heuristics
-- Runtime GPU overlay detection
-- NVIDIA runtime detection
-- AMD Radeon/ReLive runtime detection
-- Automatic NVIDIA screenshot trigger (ALT + F1)
-- Automatic AMD screenshot trigger (CTRL + SHIFT + I)
-- Overlay/runtime process visibility
-- Timeline integration for runtime detections
-
-### Improved
-- Massive reduction of Prefetch noise
-- Massive reduction of BAM noise
-- Better focus on suspicious executions only
-- Stronger behavioral correlation
-- Cleaner forensic output
-- Better contextual relevance for investigations
+- Safe runtime parameters: `-LookbackHours`, `-OutputDirectory`, `-NoOpen`, `-EnableAuditPolicy`, `-EnableScreenshotTrigger`, `-IncludeLowConfidence`, and `-GameProcessPatterns`.
+- Structured evidence output at `evidence.jsonl`.
+- Operator translation suggestions at `suggested_translations.txt`.
+- Timeline output at `timeline.txt`.
+- Correlated execution model across Security 4688, BAM, Prefetch, Defender, USB activity, service installation, and SCUM/BattlEye session context.
+- Confidence scoring with explicit evidence reasons.
+- Event ID 1102 and 104 anti-forensic visibility.
+- Event ID 7045 service and driver installation visibility.
+- Common runtime/overlay context for NVIDIA, AMD, RTSS, MSI Afterburner, Steam, Discord, Overwolf, and ReShade.
+- Optional Discord embed reporting with preview HTML/JSON, configurable colors, title, username, and item limits.
+- Optional Discord webhook secret loading from Windows DPAPI encrypted files or environment variables.
+- Discord webhook delivery now uses multipart attachments for evidence JSONL, translations, and optional filtered browser history.
+- Timestamped artifact names with optional `-SubjectLabel`.
+- Opt-in keyword-only browser history scan with URL query redaction.
+- `-SaveDiscordAttachmentsLocal` for local debugging of files otherwise sent only to Discord.
+- Internal-review defaults now enable Discord posting and filtered browser-history scanning when a webhook source is configured.
+- Added `-DisableDiscordWebhook` and `-DisableBrowserHistoryScan` for dry runs.
+- Pester tests with mocked Windows telemetry sources.
 
 ### Changed
-- TraceUSB now prioritizes correlated behavioral evidence instead of raw artifact dumping
-- Artifact analysis became context-oriented instead of enumeration-oriented
+- Process Creation auditing is no longer enabled automatically; it now requires `-EnableAuditPolicy`.
+- GPU screenshot hotkeys are no longer sent automatically; they now require `-EnableScreenshotTrigger`.
+- The readable report now distinguishes forensic relevance from proof of cheating.
+- Event parsing prefers XML/EventData fields and keeps message regex as fallback.
+- Sensitive evidence JSONL and translation artifacts are no longer saved locally by default.
 
----
-
-## [1.3.0] - Process Correlation & Behavioral Timeline
-
-### Added
-- Process creation monitoring (Event ID 4688)
-- Detection of executables launched from removable drives
-- Parent/child process correlation
-- Automatic enabling of Process Creation auditing
-- Behavioral timeline reconstruction
-
-### Improved
-- Stronger USB-to-process correlation
-- Expanded chronological analysis capabilities
-- Better visibility into short-lived executable activity
-
----
-
-## [1.2.0] - USB Context & Timeline Improvements
-
-### Added
-- USB device type classification
-- USB session duration calculation
-- Dedicated timeline output (timeline.txt)
-
-### Improved
-- Better contextual understanding of USB activity
-- Enhanced chronological correlation of events
-
----
-
-## [1.1.0] - Enhanced Defender Visibility
-
-### Added
-- Windows Defender status tracking (Event ID 5001)
-- Windows Defender configuration changes (Event ID 5004)
-- Windows Defender engine failure detection (Event ID 5010)
-
-### Improved
-- Expanded Defender coverage for better system visibility
-- More complete reporting of security-relevant events
+### Fixed
+- Timeline events are added through a functional helper.
+- Correlation no longer depends on a missing `Path` property.
+- Publisher/signature trust is used during scoring when a real path is available.
 
 ---
 
 ## [1.0.0] - Initial Release
 
 ### Added
-- USB connection and removal tracking
-- Log clearing detection (Event ID 104)
-- Windows Defender detection events (1116 / 1117)
-- Structured TXT output
+- USB connection and removal tracking.
+- Log clearing detection (Event ID 104).
+- Windows Defender event parsing.
+- Structured TXT output.

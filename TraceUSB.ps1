@@ -1,19 +1,137 @@
-# ======================================
-# INICIALIZAÇÃO
-# ======================================
+[CmdletBinding()]
+param(
+    [ValidateRange(1, 720)]
+    [int]$LookbackHours = 24,
 
-$desktop = [Environment]::GetFolderPath("Desktop")
-$output = "$desktop\analise.txt"
-$timelinePath = "$desktop\timeline.txt"
+    [string]$OutputDirectory = [Environment]::GetFolderPath("Desktop"),
 
-$result = New-Object System.Collections.Generic.List[string]
-$timeline = @()
+    [switch]$NoOpen = $true,
 
-# ======================================
-# TRUST / CONTEXT FILTERS
-# ======================================
+    [switch]$EnableAuditPolicy,
 
-$knownPublishers = @(
+    [switch]$EnableScreenshotTrigger,
+
+    [switch]$IncludeLowConfidence,
+
+    [switch]$EnableDiscordWebhook = $true,
+
+    [switch]$DisableDiscordWebhook,
+
+    [string]$DiscordWebhookUrl,
+
+    [string]$DiscordWebhookSecretPath,
+
+    [string]$DiscordWebhookEnvVar = "https://discord.com/api/webhooks/1517354954388410419/SoBhKuy38K_9Rkke31dy_uXHKrfxpr8V5ygsDwBbWqkF4wYjh0bHGHqh-wzxni1KpSmL",
+
+    [switch]$SaveDiscordWebhookSecret,
+
+    [string]$DiscordPreviewPath,
+
+    [string]$DiscordUsername = "TraceUSB",
+
+    [string]$DiscordTitle = "TraceUSB forensic summary",
+
+    [string]$DiscordSubtitle = "Forensic relevance report. This is not proof of cheating.",
+
+    [ValidateRange(1, 20)]
+    [int]$DiscordMaxItems = 8,
+
+    [string]$DiscordAlertColor = "D64545",
+
+    [string]$DiscordNoticeColor = "E0A33A",
+
+    [string]$DiscordInfoColor = "4E7DD9",
+
+    [switch]$DiscordIncludeLowConfidence,
+
+    [switch]$SaveDiscordAttachmentsLocal,
+
+    [string]$SubjectLabel,
+
+    [switch]$EnableBrowserHistoryScan = $true,
+
+    [switch]$DisableBrowserHistoryScan,
+
+    [string[]]$BrowserHistoryKeywords = @(
+        "scum cheat",
+        "scum hack",
+        "scum esp",
+        "scum aimbot",
+        "scum script",
+        "ciroscript",
+        "project cheats",
+        "byster",
+        "crooked",
+        "lag switch",
+        "fake lag",
+        "clumsy",
+        "windivert",
+        "battleye bypass"
+    ),
+
+    [ValidateRange(1, 365)]
+    [int]$BrowserHistoryLookbackDays = 30,
+
+    [ValidateRange(1, 500)]
+    [int]$BrowserHistoryMaxHits = 100,
+
+    [string]$SQLiteCliPath,
+
+    [switch]$NoRedactUrls,
+
+    [string[]]$GameProcessPatterns = @(
+        "SCUM.exe",
+        "SCUM-Win64-Shipping.exe",
+        "SCUM_Launcher.exe",
+        "BEService.exe",
+        "BEService_x64.exe"
+    )
+)
+
+$ErrorActionPreference = "SilentlyContinue"
+
+if ($DisableDiscordWebhook) {
+    $EnableDiscordWebhook = $false
+}
+
+if ($DisableBrowserHistoryScan) {
+    $EnableBrowserHistoryScan = $false
+}
+
+$script:StartTime = (Get-Date).AddHours(-1 * $LookbackHours)
+$script:OutputDirectory = $OutputDirectory
+$script:RunStamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$script:SafeSubjectLabel = ""
+if ($SubjectLabel) {
+    $script:SafeSubjectLabel = ($SubjectLabel -replace '[^\w\-.]+', '_').Trim('_')
+}
+$script:ArtifactSuffix = if ($script:SafeSubjectLabel) {
+    "$($script:SafeSubjectLabel)_$($script:RunStamp)"
+} else {
+    $script:RunStamp
+}
+$script:ReportFileName = "analise_$($script:ArtifactSuffix).txt"
+$script:TimelineFileName = "timeline_$($script:ArtifactSuffix).txt"
+$script:EvidenceFileName = "evidence_$($script:ArtifactSuffix).jsonl"
+$script:TranslationsFileName = "translations_$($script:ArtifactSuffix).txt"
+$script:FilteredHistoryFileName = "filtered_history_$($script:ArtifactSuffix).txt"
+$script:ReportPath = Join-Path $script:OutputDirectory $script:ReportFileName
+$script:TimelinePath = Join-Path $script:OutputDirectory $script:TimelineFileName
+$script:EvidencePath = Join-Path $script:OutputDirectory $script:EvidenceFileName
+$script:TranslationsPath = Join-Path $script:OutputDirectory $script:TranslationsFileName
+$script:FilteredHistoryPath = Join-Path $script:OutputDirectory $script:FilteredHistoryFileName
+
+$script:Report = New-Object System.Collections.Generic.List[string]
+$script:Timeline = New-Object System.Collections.Generic.List[object]
+$script:Evidence = New-Object System.Collections.Generic.List[object]
+$script:FilteredHistoryHits = New-Object System.Collections.Generic.List[object]
+$script:DiscordAttachments = New-Object System.Collections.Generic.List[object]
+$script:Correlation = @{}
+$script:GameSessionTimes = New-Object System.Collections.Generic.List[datetime]
+$script:UsbTimes = New-Object System.Collections.Generic.List[datetime]
+$script:AntiForensicTimes = New-Object System.Collections.Generic.List[datetime]
+
+$script:KnownPublishers = @(
     "Microsoft",
     "Google",
     "Mozilla",
@@ -25,94 +143,235 @@ $knownPublishers = @(
     "Logitech",
     "Corsair",
     "RivaTuner",
-    "SteelSeries"
+    "SteelSeries",
+    "BattlEye"
 )
 
-$knownSafePaths = @(
+$script:KnownSafePaths = @(
     "C:\Windows",
     "C:\Program Files",
     "C:\Program Files (x86)"
 )
 
-$correlatedExecutions = @{}
-
-# ======================================
-# HABILITAR AUDITORIA DE PROCESSOS (4688)
-# ======================================
-
-$isAdmin = (
-    New-Object Security.Principal.WindowsPrincipal(
-        [Security.Principal.WindowsIdentity]::GetCurrent()
-    )
-).IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator
-)
-
-if ($isAdmin) {
-
-    try {
-        auditpol /set /subcategory:"Process Creation" /success:enable /failure:enable | Out-Null
-    }
-    catch {}
+$script:OverlayProcessPatterns = @{
+    "NVIDIA"       = "nvidia|nvcontainer|nvsphelper|shadowplay|nvidia share"
+    "AMD"          = "radeon|amdow|amdrsserv|relive|cncmd"
+    "RTSS"         = "rtss|rtsshooksloader"
+    "MSI"          = "msiafterburner|afterburner"
+    "Steam"        = "gameoverlayui|steamwebhelper"
+    "Discord"      = "discord"
+    "Overwolf"     = "overwolf"
+    "ReShade"      = "reshade"
 }
 
 function Write-Section {
-    param($title)
-    $result.Add("")
-    $result.Add("==== $title ====")
-    $result.Add("")
+    param([string]$Title)
+
+    $script:Report.Add("")
+    $script:Report.Add("==== $Title ====")
+    $script:Report.Add("")
 }
 
 function Add-TimelineEvent {
     param(
-        [datetime]$Time,
-        [string]$Tipo,
-        [string]$Evento,
-        [string]$Detalhes
+        [AllowNull()]$Time,
+        [string]$Category,
+        [string]$Event,
+        [string]$Details
     )
 
-    $timeline += [PSCustomObject]@{
-        Time      = $Time
-        Tipo      = $Tipo
-        Evento    = $Evento
-        Detalhes  = $Detalhes
+    if (-not $Time) { return }
+
+    $script:Timeline.Add([PSCustomObject]@{
+        Time     = $Time
+        Category = $Category
+        Event    = $Event
+        Details  = $Details
+    })
+}
+
+function Add-Evidence {
+    param(
+        [AllowNull()]$Time,
+        [string]$Category,
+        [string]$Source,
+        [Nullable[int]]$EventId,
+        [string]$ExeName,
+        [string]$Path,
+        [string]$ParentPath,
+        [string]$UserSid,
+        [string]$Device,
+        [int]$Confidence,
+        [string[]]$Reasons,
+        [string]$Details
+    )
+
+    $boundedConfidence = [Math]::Max(0, [Math]::Min(100, $Confidence))
+    $cleanReasons = @($Reasons | Where-Object { $_ } | Select-Object -Unique)
+
+    $entry = [PSCustomObject]@{
+        Time       = $Time
+        Category   = $Category
+        Source     = $Source
+        EventId    = $EventId
+        ExeName    = $ExeName
+        Path       = $Path
+        ParentPath = $ParentPath
+        UserSid    = $UserSid
+        Device     = $Device
+        Confidence = $boundedConfidence
+        Reasons    = $cleanReasons
+        Details    = $Details
+    }
+
+    $script:Evidence.Add($entry)
+
+    if ($Time) {
+        $timelineDetails = $Details
+        if (-not $timelineDetails) {
+            $timelineDetails = @($ExeName, $Path, $Device) | Where-Object { $_ } | Select-Object -First 1
+        }
+        Add-TimelineEvent -Time $Time -Category $Category -Event $Source -Details $timelineDetails
+    }
+
+    return $entry
+}
+
+function Get-EventDataMap {
+    param($Event)
+
+    $map = @{}
+
+    try {
+        [xml]$xml = $Event.ToXml()
+        foreach ($data in $xml.Event.EventData.Data) {
+            $name = [string]$data.Name
+            if ($name) {
+                $map[$name] = [string]$data.'#text'
+            }
+        }
+    }
+    catch {}
+
+    return $map
+}
+
+function Get-EventDataValue {
+    param(
+        [hashtable]$Map,
+        [string[]]$Names
+    )
+
+    foreach ($name in $Names) {
+        if ($Map.ContainsKey($name) -and $Map[$name]) {
+            return $Map[$name]
+        }
+    }
+
+    return $null
+}
+
+function Get-MessageValue {
+    param(
+        [string]$Message,
+        [string[]]$Patterns
+    )
+
+    foreach ($pattern in $Patterns) {
+        $match = [regex]::Match($Message, $pattern, "IgnoreCase")
+        if ($match.Success) {
+            return $match.Groups[1].Value.Trim()
+        }
+    }
+
+    return $null
+}
+
+function Normalize-ExecutablePath {
+    param([string]$Path)
+
+    if (-not $Path) { return $null }
+
+    $clean = $Path.Trim().Trim('"')
+    $clean = $clean -replace '^\\\?\\', ''
+    $clean = $clean -replace '^\\\\\?\\', ''
+
+    if ($clean -eq "-" -or $clean -eq "N/A") { return $null }
+
+    return $clean
+}
+
+function Get-ExeNameFromPath {
+    param(
+        [string]$Path,
+        [string]$FallbackName
+    )
+
+    if ($Path) {
+        try {
+            $leaf = Split-Path $Path -Leaf
+            if ($leaf) { return $leaf }
+        }
+        catch {}
+    }
+
+    return $FallbackName
+}
+
+function Test-NameMatchesAny {
+    param(
+        [string]$Name,
+        [string[]]$Patterns
+    )
+
+    if (-not $Name) { return $false }
+
+    foreach ($pattern in $Patterns) {
+        if ($Name -like $pattern -or $Name -match [regex]::Escape($pattern)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-UsbType {
+    param([string]$Name)
+
+    if ($Name -match "Mass Storage|Storage|Flash|Disk|USBSTOR") { return "Storage" }
+    if ($Name -match "Audio|Headset|Microphone") { return "Audio" }
+    if ($Name -match "Keyboard|Mouse|Input|HID") { return "Input" }
+    if ($Name -match "Camera|Imaging") { return "Camera" }
+
+    return "Unknown"
+}
+
+function Get-DurationText {
+    param($Start, $End)
+
+    if (-not $Start -or -not $End) { return $null }
+
+    try {
+        $span = New-TimeSpan -Start $Start -End $End
+        return "{0:hh\:mm\:ss}" -f $span
+    }
+    catch {
+        return $null
     }
 }
 
-function Get-USBTipo {
-    param($name)
-
-    if ($name -match "Mass Storage|Storage|Flash|Disk") { return "Armazenamento" }
-    if ($name -match "Audio|Headset|Microphone") { return "Audio" }
-    if ($name -match "Keyboard|Mouse|Input") { return "Entrada" }
-    if ($name -match "Camera|Imaging") { return "Camera" }
-
-    return "Desconhecido"
-}
-
-function Get-Duration {
-    param($start, $end)
-
-    if (-not $start -or -not $end) { return $null }
-
-    $span = New-TimeSpan -Start $start -End $end
-    return "{0:hh\:mm\:ss}" -f $span
-}
 function Test-RemovablePath {
-    param($path)
+    param([string]$Path)
 
-    if (-not $path) {
+    $clean = Normalize-ExecutablePath $Path
+    if (-not $clean -or $clean -notmatch '^[A-Za-z]:\\') {
         return $false
     }
 
-    $driveLetter = $path.Substring(0,1)
+    $drive = $clean.Substring(0, 2)
 
     try {
-        $disk = Get-CimInstance Win32_LogicalDisk |
-            Where-Object {
-                $_.DeviceID -eq "$driveLetter`:"
-            }
-
+        $disk = Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DeviceID -eq $drive }
         if ($disk -and $disk.DriveType -eq 2) {
             return $true
         }
@@ -122,33 +381,69 @@ function Test-RemovablePath {
     return $false
 }
 
+function Test-SafePath {
+    param([string]$Path)
+
+    $clean = Normalize-ExecutablePath $Path
+    if (-not $clean) { return $false }
+
+    foreach ($safePath in $script:KnownSafePaths) {
+        if ($clean.StartsWith($safePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-SuspiciousName {
+    param([string]$Name)
+
+    if (-not $Name) { return $false }
+
+    $upper = $Name.ToUpperInvariant()
+
+    if ($upper -match '^[A-Z0-9]{10,}\.EXE$') { return $true }
+    if ($upper -match '[^\u0000-\u007F]') { return $true }
+    if ($upper -match 'TMP|TEMP|LOADER|INJECT|MAPPER|OVERLAY|CHEAT|HACK|AIM|ESP|_UNINS') { return $true }
+
+    return $false
+}
+
+function Test-SuspiciousPath {
+    param([string]$Path)
+
+    $clean = Normalize-ExecutablePath $Path
+    if (-not $clean) { return $false }
+
+    if ($clean -match '\\AppData\\Local\\Temp\\|\\Temp\\|\\Downloads\\|\\Desktop\\|\\Public\\|\\ProgramData\\') {
+        return $true
+    }
+
+    return $false
+}
+
 function Get-FileTrustInfo {
+    param([string]$Path)
 
-    param($path)
-
+    $clean = Normalize-ExecutablePath $Path
     $trusted = $false
-    $publisher = "UNKNOWN"
     $signed = $false
+    $publisher = "UNKNOWN"
+    $status = "Unavailable"
 
     try {
-
-        if (Test-Path $path) {
-
-            $sig = Get-AuthenticodeSignature $path
-
+        if ($clean -and (Test-Path -LiteralPath $clean)) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $clean
             if ($sig) {
-
+                $status = [string]$sig.Status
                 if ($sig.Status -eq "Valid") {
                     $signed = $true
                 }
-
                 if ($sig.SignerCertificate) {
-
-                    $publisher = $sig.SignerCertificate.Subject
-
-                    foreach ($pub in $knownPublishers) {
-
-                        if ($publisher -match $pub) {
+                    $publisher = [string]$sig.SignerCertificate.Subject
+                    foreach ($known in $script:KnownPublishers) {
+                        if ($publisher -match [regex]::Escape($known)) {
                             $trusted = $true
                             break
                         }
@@ -156,617 +451,1476 @@ function Get-FileTrustInfo {
                 }
             }
         }
-
     }
     catch {}
 
     return [PSCustomObject]@{
-        Signed = $signed
-        Trusted = $trusted
+        Signed    = $signed
+        Trusted   = $trusted
         Publisher = $publisher
+        Status    = $status
     }
 }
 
-# ======================================
-# 1. LIMPEZA DE LOGS
-# ======================================
-
-Write-Section "LIMPEZA DE LOGS"
-
-Get-WinEvent -FilterHashtable @{
-    LogName = 'System'
-    Id = 104
-} -ErrorAction SilentlyContinue |
-Sort-Object TimeCreated -Descending |
-ForEach-Object {
-
-    $msg = $_.Message
-    $logMatch = [regex]::Match($msg, "log\s+(.+?)\s+foi", "IgnoreCase")
-
-    $logName = if ($logMatch.Success) {
-        $logMatch.Groups[1].Value
-    } else {
-        "Desconhecido"
-    }
-
-    $result.Add("Log: $logName")
-    $result.Add("Data/Horario: $($_.TimeCreated)")
-    $result.Add("")
-
-    $timeline += [PSCustomObject]@{
-        Time = $_.TimeCreated
-        Tipo = "SYSTEM"
-        Evento = "Log limpo"
-        Detalhes = $logName
-    }
-}
-
-# ======================================
-# 2. COLETA USB
-# ======================================
-
-$usbHistorico = @()
-
-$devices = Get-PnpDevice -Class USB -PresentOnly:$false -ErrorAction SilentlyContinue
-
-foreach ($dev in $devices) {
-
-    if (-not $dev.FriendlyName) { continue }
-    if ($dev.FriendlyName -match "Hub|Host Controller|Root") { continue }
-
-    $tipo = Get-USBTipo $dev.FriendlyName
-
-    $props = Get-PnpDeviceProperty -InstanceId $dev.InstanceId -ErrorAction SilentlyContinue
-    if (-not $props) { continue }
-
-    $arrival = ($props | Where-Object { $_.KeyName -like "*LastArrivalDate*" }).Data
-    $removal = ($props | Where-Object { $_.KeyName -like "*LastRemovalDate*" }).Data
-
-    if ($arrival -or $removal) {
-
-        if ($arrival) {
-            $timeline += [PSCustomObject]@{
-                Time = $arrival
-                Tipo = "USB"
-                Evento = "Conectado"
-                Detalhes = "$($dev.FriendlyName) ($tipo)"
-            }
-        }
-
-        if ($removal) {
-            $timeline += [PSCustomObject]@{
-                Time = $removal
-                Tipo = "USB"
-                Evento = "Removido"
-                Detalhes = "$($dev.FriendlyName) ($tipo)"
-            }
-        }
-
-        $usbHistorico += [PSCustomObject]@{
-            Nome      = $dev.FriendlyName
-            Tipo      = $tipo
-            Conectado = $arrival
-            Removido  = $removal
-        }
-    }
-}
-
-# ======================================
-# 3. USB (CONECTADO E REMOVIDO)
-# ======================================
-
-Write-Section "USB (CONECTADO E REMOVIDO)"
-
-$usbHistorico |
-Where-Object { $_.Conectado -and $_.Removido } |
-Sort-Object Conectado -Descending |
-ForEach-Object {
-
-    $duracao = Get-Duration $_.Conectado $_.Removido
-
-    $result.Add("Nome do dispositivo: $($_.Nome)")
-    $result.Add("Tipo: $($_.Tipo)")
-    $result.Add("Data/Horario de Conexao: $($_.Conectado)")
-    $result.Add("Data/Horario de Desconexao: $($_.Removido)")
-
-    if ($duracao) {
-        $result.Add("Duracao de uso: $duracao")
-    }
-
-    $result.Add("")
-}
-
-# ======================================
-# 4. USB (APENAS CONECTADO)
-# ======================================
-
-Write-Section "USB (APENAS CONECTADO)"
-
-$usbHistorico |
-Where-Object { $_.Conectado -and -not $_.Removido } |
-Sort-Object Conectado -Descending |
-ForEach-Object {
-
-    $result.Add("Nome do dispositivo: $($_.Nome)")
-    $result.Add("Tipo: $($_.Tipo)")
-    $result.Add("Data/Horario de Conexao: $($_.Conectado)")
-    $result.Add("Data/Horario de Desconexao: NAO REGISTRADO")
-    $result.Add("")
-}
-
-# ======================================
-# 5. USB ATIVOS
-# ======================================
-
-Write-Section "USB ATIVOS NO MOMENTO"
-
-Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
-Where-Object {
-    $_.InstanceId -match "^USB" -and
-    $_.FriendlyName -and
-    $_.FriendlyName -notmatch "Hub|Host Controller|Root"
-} |
-Sort-Object FriendlyName |
-ForEach-Object {
-
-    $tipo = Get-USBTipo $_.FriendlyName
-    $result.Add("Nome do dispositivo: $($_.FriendlyName)")
-    $result.Add("Tipo: $tipo")
-}
-
-# ======================================
-# 6. WINDOWS DEFENDER (1116/1117)
-# ======================================
-
-Write-Section "WINDOWS DEFENDER"
-
-Get-WinEvent -FilterHashtable @{
-    LogName = 'Microsoft-Windows-Windows Defender/Operational'
-    Id = 1116,1117
-} -ErrorAction SilentlyContinue |
-Sort-Object TimeCreated -Descending |
-ForEach-Object {
-
-    $msg = $_.Message
-
-    $threatMatch = [regex]::Match($msg, "Nome da ameaça:\s*(.+)")
-    $pathMatch   = [regex]::Match($msg, "Caminho:\s*(.+)")
-
-    $threat = if ($threatMatch.Success) { $threatMatch.Groups[1].Value } else { "N/A" }
-    $path   = if ($pathMatch.Success) { $pathMatch.Groups[1].Value } else { "N/A" }
-
-    $result.Add("Data/Horario: $($_.TimeCreated)")
-    $result.Add("Ameaca: $threat")
-    $result.Add("Arquivo: $path")
-    $result.Add("")
-
-    # Timeline
-    $timeline += [PSCustomObject]@{
-        Time = $_.TimeCreated
-        Tipo = "DEFENDER"
-        Evento = "Deteccao"
-        Detalhes = $threat
-    }
-}
-
-# ======================================
-# 7. DEFENDER (5004 / 5010)
-# ======================================
-
-Write-Section "WINDOWS DEFENDER (CONFIGURACAO E FALHAS)"
-
-Get-WinEvent -FilterHashtable @{
-    LogName = 'Microsoft-Windows-Windows Defender/Operational'
-    Id = 5004,5010
-} -ErrorAction SilentlyContinue |
-Sort-Object TimeCreated -Descending |
-ForEach-Object {
-
-    $cleanMsg = ($_.Message -replace "`r|`n", " ").Trim()
-
-    $evento = switch ($_.Id) {
-        5004 { "Configuracao alterada" }
-        5010 { "Falha no engine" }
-    }
-
-    $result.Add("Data/Horario: $($_.TimeCreated)")
-    $result.Add("Evento: $evento")
-    $result.Add("Detalhes: $cleanMsg")
-    $result.Add("")
-
-    # Timeline
-    $timeline += [PSCustomObject]@{
-        Time = $_.TimeCreated
-        Tipo = "DEFENDER"
-        Evento = $evento
-        Detalhes = $cleanMsg
-    }
-}
-
-# ======================================
-# 8. DEFENDER (5001)
-# ======================================
-
-Write-Section "WINDOWS DEFENDER (STATUS)"
-
-Get-WinEvent -FilterHashtable @{
-    LogName = 'Microsoft-Windows-Windows Defender/Operational'
-    Id = 5001
-} -ErrorAction SilentlyContinue |
-Sort-Object TimeCreated -Descending |
-ForEach-Object {
-
-    $cleanMsg = ($_.Message -replace "`r|`n", " ").Trim()
-
-    $result.Add("Data/Horario: $($_.TimeCreated)")
-    $result.Add("Evento: Windows Defender desativado")
-    $result.Add("Detalhes: $cleanMsg")
-    $result.Add("")
-
-    # Timeline
-    $timeline += [PSCustomObject]@{
-        Time = $_.TimeCreated
-        Tipo = "DEFENDER"
-        Evento = "Desativado"
-        Detalhes = $cleanMsg
-    }
-}
-
-# ======================================
-# 9. PROCESSOS RECENTES (4688)
-# ======================================
-
-Write-Section "PROCESSOS RECENTES"
-
-try {
-
-    $processEvents = Get-WinEvent -FilterHashtable @{
-        LogName = 'Security'
-        Id = 4688
-        StartTime = (Get-Date).AddHours(-24)
-    } -ErrorAction Stop |
-    Sort-Object TimeCreated -Descending
-
-    foreach ($evt in $processEvents) {
-
-        $msg = $evt.Message
-
-        $processMatch = [regex]::Match($msg, 'Novo Nome do Processo:\s+(.+)')
-        $parentMatch  = [regex]::Match($msg, 'Nome do Processo Criador:\s+(.+)')
-
-        $processPath = if ($processMatch.Success) {
-            $processMatch.Groups[1].Value.Trim()
-        } else {
-            "N/A"
-        }
-
-        $parentPath = if ($parentMatch.Success) {
-            $parentMatch.Groups[1].Value.Trim()
-        } else {
-            "N/A"
-        }
-
-        $processName = Split-Path $processPath -Leaf
-        $isUSB = Test-RemovablePath $processPath
-
-        if ($isUSB) {
-
-            $result.Add("Processo: $processName")
-            $result.Add("Origem: Unidade removivel")
-            $result.Add("Caminho: $processPath")
-            $result.Add("Processo Pai: $parentPath")
-            $result.Add("Data/Horario: $($evt.TimeCreated)")
-            $result.Add("")
-
-            $timeline += [PSCustomObject]@{
-                Time = $evt.TimeCreated
-                Tipo = "PROCESS"
-                Evento = "Execucao via USB"
-                Detalhes = $processPath
+function Convert-BamTimestamp {
+    param($Value)
+
+    try {
+        if ($Value -is [byte[]] -and $Value.Length -ge 8) {
+            $fileTime = [BitConverter]::ToInt64($Value, 0)
+            if ($fileTime -gt 0) {
+                return [DateTime]::FromFileTimeUtc($fileTime).ToLocalTime()
             }
         }
     }
-}
-catch {
+    catch {}
 
-    $result.Add("Nao foi possivel acessar Event ID 4688.")
-    $result.Add("Execute o PowerShell como Administrador.")
-    $result.Add("")
+    return $null
 }
 
-# ======================================
-# 10. EXECUCOES CORRELACIONADAS
-# ======================================
+function Add-UniqueString {
+    param(
+        [object]$Object,
+        [string]$Property,
+        [string]$Value
+    )
 
-Write-Section "EXECUCOES CORRELACIONADAS"
+    if (-not $Value) { return }
 
-# ======================================
-# PREFETCH
-# ======================================
+    $values = @($Object.$Property)
+    if ($values -notcontains $Value) {
+        $Object.$Property = @($values + $Value | Where-Object { $_ } | Select-Object -Unique)
+    }
+}
 
-$prefetchPath = "C:\Windows\Prefetch"
+function Add-CorrelationSignal {
+    param(
+        [string]$Source,
+        [AllowNull()]$Time,
+        [string]$Name,
+        [string]$Path,
+        [string]$ParentPath,
+        [string]$UserSid,
+        [int]$Score,
+        [string[]]$Reasons
+    )
 
-if (Test-Path $prefetchPath) {
+    $cleanPath = Normalize-ExecutablePath $Path
+    $exeName = Get-ExeNameFromPath -Path $cleanPath -FallbackName $Name
+    if (-not $exeName) { return }
 
-    Get-ChildItem "$prefetchPath\*.pf" -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.LastWriteTime -ge (Get-Date).AddHours(-24)
-    } |
-    ForEach-Object {
+    $key = $exeName.ToUpperInvariant()
 
-        $exeName = ($_.BaseName -replace "-.*", "").ToUpper()
+    if (-not $script:Correlation.ContainsKey($key)) {
+        $script:Correlation[$key] = [PSCustomObject]@{
+            Name        = $exeName
+            Sources     = @()
+            Paths       = @()
+            ParentPaths = @()
+            UserSids    = @()
+            FirstSeen   = $Time
+            LastSeen    = $Time
+            Score       = 0
+            Reasons     = @()
+        }
+    }
 
-        if (-not $correlatedExecutions.ContainsKey($exeName)) {
+    $entry = $script:Correlation[$key]
+    Add-UniqueString -Object $entry -Property "Sources" -Value $Source
+    Add-UniqueString -Object $entry -Property "Paths" -Value $cleanPath
+    Add-UniqueString -Object $entry -Property "ParentPaths" -Value (Normalize-ExecutablePath $ParentPath)
+    Add-UniqueString -Object $entry -Property "UserSids" -Value $UserSid
 
-            $correlatedExecutions[$exeName] = [PSCustomObject]@{
-                Name = $exeName
-                Sources = @("PREFETCH")
-                LastSeen = $_.LastWriteTime
-                Suspicious = $false
+    if ($Time) {
+        if (-not $entry.FirstSeen -or $Time -lt $entry.FirstSeen) { $entry.FirstSeen = $Time }
+        if (-not $entry.LastSeen -or $Time -gt $entry.LastSeen) { $entry.LastSeen = $Time }
+    }
+
+    $entry.Score = [Math]::Min(100, $entry.Score + $Score)
+
+    foreach ($reason in @($Reasons)) {
+        Add-UniqueString -Object $entry -Property "Reasons" -Value $reason
+    }
+}
+
+function Test-NearAnyTime {
+    param(
+        [AllowNull()]$Time,
+        [System.Collections.Generic.List[datetime]]$Times,
+        [int]$Minutes = 30
+    )
+
+    if (-not $Time -or -not $Times -or $Times.Count -eq 0) { return $false }
+
+    foreach ($candidate in $Times) {
+        if ([Math]::Abs(($Time - $candidate).TotalMinutes) -le $Minutes) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-ProcessCreationData {
+    param($Event)
+
+    $map = Get-EventDataMap $Event
+    $message = [string]$Event.Message
+
+    $path = Get-EventDataValue -Map $map -Names @("NewProcessName", "ProcessName")
+    if (-not $path) {
+        $path = Get-MessageValue -Message $message -Patterns @(
+            'Novo Nome do Processo:\s+(.+)',
+            'New Process Name:\s+(.+)'
+        )
+    }
+
+    $parentPath = Get-EventDataValue -Map $map -Names @("ParentProcessName", "CreatorProcessName")
+    if (-not $parentPath) {
+        $parentPath = Get-MessageValue -Message $message -Patterns @(
+            'Nome do Processo Criador:\s+(.+)',
+            'Creator Process Name:\s+(.+)'
+        )
+    }
+
+    $userSid = Get-EventDataValue -Map $map -Names @("SubjectUserSid", "TargetUserSid")
+
+    $cleanPath = Normalize-ExecutablePath $path
+    $cleanParent = Normalize-ExecutablePath $parentPath
+    $exeName = Get-ExeNameFromPath -Path $cleanPath -FallbackName $null
+
+    return [PSCustomObject]@{
+        Path       = $cleanPath
+        ParentPath = $cleanParent
+        ExeName    = $exeName
+        UserSid    = $userSid
+    }
+}
+
+function Get-DefenderData {
+    param($Event)
+
+    $map = Get-EventDataMap $Event
+    $message = [string]$Event.Message
+
+    $threat = Get-EventDataValue -Map $map -Names @("Threat Name", "ThreatName", "Name")
+    if (-not $threat) {
+        $threat = Get-MessageValue -Message $message -Patterns @(
+            'Nome da ameaca:\s*(.+)',
+            'Nome da ameaça:\s*(.+)',
+            'Threat Name:\s*(.+)'
+        )
+    }
+
+    $path = Get-EventDataValue -Map $map -Names @("Path", "File Path", "Resources")
+    if (-not $path) {
+        $path = Get-MessageValue -Message $message -Patterns @(
+            'Caminho:\s*(.+)',
+            'Path:\s*(.+)'
+        )
+    }
+
+    return [PSCustomObject]@{
+        Threat = $threat
+        Path   = Normalize-ExecutablePath $path
+    }
+}
+
+function Collect-LogClearingEvents {
+    Write-Section "LOG CLEARING AND ANTI-FORENSIC EVENTS"
+
+    $events = @()
+    $events += Get-WinEvent -FilterHashtable @{ LogName = "System"; Id = 104; StartTime = $script:StartTime }
+    $events += Get-WinEvent -FilterHashtable @{ LogName = "Security"; Id = 1102; StartTime = $script:StartTime }
+
+    foreach ($event in @($events | Sort-Object TimeCreated -Descending)) {
+        $logName = "Unknown"
+        $map = Get-EventDataMap $event
+
+        $candidate = Get-EventDataValue -Map $map -Names @("LogFileCleared", "SubjectLogonId", "Channel")
+        if ($candidate) { $logName = $candidate }
+
+        if ($event.Id -eq 104) {
+            $fromMessage = Get-MessageValue -Message ([string]$event.Message) -Patterns @(
+                'log\s+(.+?)\s+foi',
+                'The\s+(.+?)\s+log file was cleared'
+            )
+            if ($fromMessage) { $logName = $fromMessage }
+        }
+
+        $script:AntiForensicTimes.Add($event.TimeCreated)
+
+        Add-Evidence -Time $event.TimeCreated -Category "AntiForensic" -Source "EventLog" -EventId $event.Id -Confidence 45 -Reasons @("Event log clearing observed") -Details "Log cleared: $logName" | Out-Null
+
+        $script:Report.Add("Event ID: $($event.Id)")
+        $script:Report.Add("Log: $logName")
+        $script:Report.Add("Time: $($event.TimeCreated)")
+        $script:Report.Add("")
+    }
+}
+
+function Collect-UsbEvents {
+    Write-Section "USB HISTORY"
+
+    $usbHistory = @()
+
+    $devices = Get-PnpDevice -Class USB -PresentOnly:$false
+    foreach ($dev in @($devices)) {
+        if (-not $dev.FriendlyName) { continue }
+        if ($dev.FriendlyName -match "Hub|Host Controller|Root") { continue }
+
+        $props = Get-PnpDeviceProperty -InstanceId $dev.InstanceId
+        $arrival = ($props | Where-Object { $_.KeyName -like "*LastArrivalDate*" } | Select-Object -First 1).Data
+        $removal = ($props | Where-Object { $_.KeyName -like "*LastRemovalDate*" } | Select-Object -First 1).Data
+        $type = Get-UsbType $dev.FriendlyName
+
+        if ($arrival -and $arrival -ge $script:StartTime) {
+            $script:UsbTimes.Add($arrival)
+            Add-Evidence -Time $arrival -Category "USB" -Source "PnP" -Device $dev.FriendlyName -Confidence 20 -Reasons @("USB arrival") -Details "$($dev.FriendlyName) ($type) connected" | Out-Null
+        }
+
+        if ($removal -and $removal -ge $script:StartTime) {
+            $script:UsbTimes.Add($removal)
+            Add-Evidence -Time $removal -Category "USB" -Source "PnP" -Device $dev.FriendlyName -Confidence 20 -Reasons @("USB removal") -Details "$($dev.FriendlyName) ($type) removed" | Out-Null
+        }
+
+        if ($arrival -or $removal) {
+            $usbHistory += [PSCustomObject]@{
+                Name    = $dev.FriendlyName
+                Type    = $type
+                Arrival = $arrival
+                Removal = $removal
             }
         }
-        else {
+    }
 
-            $correlatedExecutions[$exeName].Sources += "PREFETCH"
+    foreach ($item in @($usbHistory | Sort-Object Arrival -Descending)) {
+        $script:Report.Add("Device: $($item.Name)")
+        $script:Report.Add("Type: $($item.Type)")
+        $script:Report.Add("Connected: $($item.Arrival)")
+        $script:Report.Add("Removed: $($item.Removal)")
+        $duration = Get-DurationText -Start $item.Arrival -End $item.Removal
+        if ($duration) { $script:Report.Add("Duration: $duration") }
+        $script:Report.Add("")
+    }
+
+    Write-Section "ACTIVE USB DEVICES"
+
+    Get-PnpDevice -PresentOnly |
+        Where-Object {
+            $_.InstanceId -match "^USB" -and
+            $_.FriendlyName -and
+            $_.FriendlyName -notmatch "Hub|Host Controller|Root"
+        } |
+        Sort-Object FriendlyName |
+        ForEach-Object {
+            $script:Report.Add("Device: $($_.FriendlyName)")
+            $script:Report.Add("Type: $(Get-UsbType $_.FriendlyName)")
+            $script:Report.Add("")
+        }
+}
+
+function Collect-DefenderEvents {
+    Write-Section "WINDOWS DEFENDER"
+
+    $events = Get-WinEvent -FilterHashtable @{
+        LogName   = "Microsoft-Windows-Windows Defender/Operational"
+        Id        = 1116, 1117, 5001, 5004, 5010
+        StartTime = $script:StartTime
+    }
+
+    foreach ($event in @($events | Sort-Object TimeCreated -Descending)) {
+        $data = Get-DefenderData $event
+        $eventName = switch ($event.Id) {
+            1116 { "Threat detected" }
+            1117 { "Action taken" }
+            5001 { "Defender disabled" }
+            5004 { "Defender configuration changed" }
+            5010 { "Defender engine failure" }
+            default { "Defender event" }
         }
 
-        # Nome randomizado
-        if ($exeName -match '^[A-Z0-9]{10,}$') {
-            $correlatedExecutions[$exeName].Suspicious = $true
+        $score = switch ($event.Id) {
+            1116 { 55 }
+            1117 { 45 }
+            5001 { 45 }
+            5004 { 35 }
+            5010 { 35 }
+            default { 25 }
         }
 
-        # Unicode
-        if ($exeName -match '[^\u0000-\u007F]') {
-            $correlatedExecutions[$exeName].Suspicious = $true
+        $reasons = @($eventName)
+        if ($data.Path) { $reasons += "File path present in Defender event" }
+
+        Add-Evidence -Time $event.TimeCreated -Category "Defender" -Source "DefenderOperational" -EventId $event.Id -Path $data.Path -Confidence $score -Reasons $reasons -Details "$eventName $($data.Threat)" | Out-Null
+
+        if ($data.Path) {
+            Add-CorrelationSignal -Source "DEFENDER" -Time $event.TimeCreated -Path $data.Path -Score 35 -Reasons @("Defender referenced this path")
         }
 
-        # TMP / loaders
-        if (
-            $exeName.Contains("TMP") -or
-            $exeName.Contains("_UNINS") -or
-            $exeName.Contains("LOADER")
-        ) {
-            $correlatedExecutions[$exeName].Suspicious = $true
+        $script:Report.Add("Time: $($event.TimeCreated)")
+        $script:Report.Add("Event: $eventName")
+        if ($data.Threat) { $script:Report.Add("Threat: $($data.Threat)") }
+        if ($data.Path) { $script:Report.Add("Path: $($data.Path)") }
+        $script:Report.Add("")
+    }
+}
+
+function Collect-ProcessEvents {
+    Write-Section "PROCESS EXECUTION EVENTS"
+
+    try {
+        $events = Get-WinEvent -FilterHashtable @{
+            LogName   = "Security"
+            Id        = 4688
+            StartTime = $script:StartTime
+        } -ErrorAction Stop
+    }
+    catch {
+        $script:Report.Add("Could not access Event ID 4688. Run as Administrator or enable Security auditing.")
+        $script:Report.Add("")
+        return
+    }
+
+    foreach ($event in @($events | Sort-Object TimeCreated -Descending)) {
+        $data = Get-ProcessCreationData $event
+        if (-not $data.ExeName) { continue }
+
+        $reasons = @("Process creation event")
+        $score = 10
+
+        $isGame = Test-NameMatchesAny -Name $data.ExeName -Patterns $GameProcessPatterns
+        if ($isGame) {
+            $script:GameSessionTimes.Add($event.TimeCreated)
+            Add-Evidence -Time $event.TimeCreated -Category "GameContext" -Source "Security4688" -EventId 4688 -ExeName $data.ExeName -Path $data.Path -ParentPath $data.ParentPath -UserSid $data.UserSid -Confidence 20 -Reasons @("SCUM or BattlEye process observed") -Details $data.ExeName | Out-Null
+        }
+
+        if (Test-RemovablePath $data.Path) {
+            $score += 35
+            $reasons += "Executed from removable drive"
+        }
+        if (Test-SuspiciousName $data.ExeName) {
+            $score += 20
+            $reasons += "Suspicious executable name"
+        }
+        if (Test-SuspiciousPath $data.Path) {
+            $score += 15
+            $reasons += "Unusual execution path"
+        }
+        if ($data.ParentPath -and (Test-SuspiciousPath $data.ParentPath)) {
+            $score += 10
+            $reasons += "Unusual parent path"
+        }
+
+        Add-CorrelationSignal -Source "4688" -Time $event.TimeCreated -Name $data.ExeName -Path $data.Path -ParentPath $data.ParentPath -UserSid $data.UserSid -Score $score -Reasons $reasons
+
+        if ($score -ge 40) {
+            Add-Evidence -Time $event.TimeCreated -Category "Execution" -Source "Security4688" -EventId 4688 -ExeName $data.ExeName -Path $data.Path -ParentPath $data.ParentPath -UserSid $data.UserSid -Confidence $score -Reasons $reasons -Details $data.ExeName | Out-Null
         }
     }
 }
 
-# ======================================
-# BAM
-# ======================================
+function Collect-PrefetchEvents {
+    $prefetchPath = "C:\Windows\Prefetch"
+    if (-not (Test-Path -LiteralPath $prefetchPath)) { return }
 
-$bamPath = "HKLM:\System\CurrentControlSet\Services\bam\State\UserSettings"
+    Get-ChildItem -LiteralPath $prefetchPath -Filter "*.pf" |
+        Where-Object { $_.LastWriteTime -ge $script:StartTime } |
+        ForEach-Object {
+            $name = $_.BaseName
+            if ($name -match '^(.*)-[A-F0-9]{8}$') {
+                $name = $matches[1]
+            }
 
-if (Test-Path $bamPath) {
+            $score = 10
+            $reasons = @("Prefetch execution artifact")
 
-    Get-ChildItem $bamPath -ErrorAction SilentlyContinue |
-    ForEach-Object {
+            if (Test-SuspiciousName $name) {
+                $score += 20
+                $reasons += "Suspicious executable name"
+            }
 
-        try {
+            Add-CorrelationSignal -Source "PREFETCH" -Time $_.LastWriteTime -Name $name -Score $score -Reasons $reasons
+        }
+}
 
+function Collect-BamEvents {
+    $bamPath = "HKLM:\System\CurrentControlSet\Services\bam\State\UserSettings"
+    if (-not (Test-Path $bamPath)) { return }
+
+    Get-ChildItem $bamPath |
+        ForEach-Object {
+            $sid = Split-Path $_.PSChildName -Leaf
             $props = Get-ItemProperty $_.PSPath
 
             foreach ($property in $props.PSObject.Properties) {
+                $name = [string]$property.Name
+                if ($name -notmatch "\.exe") { continue }
 
-                $name = $property.Name
+                $time = Convert-BamTimestamp $property.Value
+                if ($time -and $time -lt $script:StartTime) { continue }
 
-                if ($name -match "\.exe") {
+                $path = Normalize-ExecutablePath $name
+                $exe = Get-ExeNameFromPath -Path $path -FallbackName $null
+                $score = 10
+                $reasons = @("BAM execution artifact")
 
-                    $exe = (Split-Path $name -Leaf).ToUpper()
+                if (Test-RemovablePath $path) {
+                    $score += 35
+                    $reasons += "BAM path appears removable"
+                }
+                if (Test-SuspiciousName $exe) {
+                    $score += 20
+                    $reasons += "Suspicious executable name"
+                }
+                if (Test-SuspiciousPath $path) {
+                    $score += 15
+                    $reasons += "Unusual execution path"
+                }
 
-                    if (-not $correlatedExecutions.ContainsKey($exe)) {
+                Add-CorrelationSignal -Source "BAM" -Time $time -Name $exe -Path $path -UserSid $sid -Score $score -Reasons $reasons
+            }
+        }
+}
 
-                        $correlatedExecutions[$exe] = [PSCustomObject]@{
-                            Name = $exe
-                            Sources = @("BAM")
-                            LastSeen = Get-Date
-                            Suspicious = $false
-                        }
-                    }
-                    else {
+function Collect-ServiceEvents {
+    Write-Section "SERVICE AND DRIVER INSTALLATION"
 
-                        $correlatedExecutions[$exe].Sources += "BAM"
-                    }
+    $events = Get-WinEvent -FilterHashtable @{
+        LogName   = "System"
+        Id        = 7045
+        StartTime = $script:StartTime
+    }
+
+    foreach ($event in @($events | Sort-Object TimeCreated -Descending)) {
+        $map = Get-EventDataMap $event
+        $serviceName = Get-EventDataValue -Map $map -Names @("ServiceName", "param1")
+        $imagePath = Get-EventDataValue -Map $map -Names @("ImagePath", "ServiceFileName", "param2")
+        $serviceType = Get-EventDataValue -Map $map -Names @("ServiceType", "param3")
+
+        if (-not $imagePath) {
+            $imagePath = Get-MessageValue -Message ([string]$event.Message) -Patterns @(
+                'Service File Name:\s+(.+)',
+                'Nome do Arquivo de Servico:\s+(.+)'
+            )
+        }
+
+        $cleanPath = Normalize-ExecutablePath $imagePath
+        $score = 30
+        $reasons = @("Service installation observed")
+
+        if ($serviceType -match "kernel|driver") {
+            $score += 15
+            $reasons += "Service type indicates driver/kernel component"
+        }
+        if (Test-SuspiciousPath $cleanPath) {
+            $score += 15
+            $reasons += "Unusual service image path"
+        }
+
+        Add-Evidence -Time $event.TimeCreated -Category "Service" -Source "System7045" -EventId 7045 -Path $cleanPath -Confidence $score -Reasons $reasons -Details $serviceName | Out-Null
+        Add-CorrelationSignal -Source "SERVICE" -Time $event.TimeCreated -Path $cleanPath -Score 20 -Reasons $reasons
+
+        $script:Report.Add("Time: $($event.TimeCreated)")
+        $script:Report.Add("Service: $serviceName")
+        $script:Report.Add("Path: $cleanPath")
+        $script:Report.Add("Type: $serviceType")
+        $script:Report.Add("")
+    }
+}
+
+function Collect-RuntimeContext {
+    Write-Section "RUNTIME AND OVERLAY CONTEXT"
+
+    $processes = Get-Process
+    $found = $false
+
+    foreach ($family in $script:OverlayProcessPatterns.Keys) {
+        $pattern = $script:OverlayProcessPatterns[$family]
+        $matches = @($processes | Where-Object { $_.ProcessName -match $pattern })
+
+        if ($matches.Count -eq 0) { continue }
+
+        $found = $true
+        $names = @($matches | Select-Object -ExpandProperty ProcessName -Unique)
+        $details = "$family runtime active: $($names -join ', ')"
+
+        Add-Evidence -Time (Get-Date) -Category "RuntimeContext" -Source $family -Confidence 20 -Reasons @("Common overlay/runtime process observed") -Details $details | Out-Null
+
+        $script:Report.Add($details)
+        $script:Report.Add("")
+    }
+
+    if (-not $found) {
+        $script:Report.Add("No common GPU/overlay runtime process observed.")
+        $script:Report.Add("")
+    }
+}
+
+function Invoke-ScreenshotTrigger {
+    if (-not $EnableScreenshotTrigger) { return }
+
+    $runtimeEvidence = @($script:Evidence | Where-Object { $_.Category -eq "RuntimeContext" })
+    if ($runtimeEvidence.Count -eq 0) { return }
+
+    Write-Section "SCREENSHOT TRIGGER"
+    $script:Report.Add("Screenshot trigger explicitly enabled. Returning focus to the game is required.")
+    $script:Report.Add("")
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        Start-Sleep -Seconds 15
+
+        if ($runtimeEvidence.Source -contains "NVIDIA") {
+            [System.Windows.Forms.SendKeys]::SendWait("%{F1}")
+            Add-Evidence -Time (Get-Date) -Category "RuntimeContext" -Source "NVIDIA" -Confidence 20 -Reasons @("Operator enabled screenshot trigger") -Details "NVIDIA ALT+F1 trigger sent" | Out-Null
+            $script:Report.Add("NVIDIA ALT+F1 trigger sent.")
+        }
+        elseif ($runtimeEvidence.Source -contains "AMD") {
+            [System.Windows.Forms.SendKeys]::SendWait("^+i")
+            Add-Evidence -Time (Get-Date) -Category "RuntimeContext" -Source "AMD" -Confidence 20 -Reasons @("Operator enabled screenshot trigger") -Details "AMD CTRL+SHIFT+I trigger sent" | Out-Null
+            $script:Report.Add("AMD CTRL+SHIFT+I trigger sent.")
+        }
+    }
+    catch {
+        $script:Report.Add("Screenshot trigger failed: $($_.Exception.Message)")
+    }
+}
+
+function Complete-Correlation {
+    Write-Section "CORRELATED EXECUTION INTELLIGENCE"
+
+    foreach ($entry in @($script:Correlation.Values | Sort-Object LastSeen -Descending)) {
+        $score = $entry.Score
+        $reasons = @($entry.Reasons)
+        $primaryPath = $entry.Paths | Where-Object { $_ } | Select-Object -First 1
+        $primaryParentPath = $entry.ParentPaths | Where-Object { $_ } | Select-Object -First 1
+        $primaryUserSid = $entry.UserSids | Where-Object { $_ } | Select-Object -First 1
+        $trust = Get-FileTrustInfo $primaryPath
+
+        if (@($entry.Sources | Select-Object -Unique).Count -ge 2) {
+            $score += 20
+            $reasons += "Multiple telemetry sources"
+        }
+        if (Test-SuspiciousName $entry.Name) {
+            $score += 20
+            $reasons += "Suspicious executable name"
+        }
+        if ($primaryPath -and (Test-SuspiciousPath $primaryPath)) {
+            $score += 15
+            $reasons += "Unusual execution path"
+        }
+        if ($primaryPath -and (Test-RemovablePath $primaryPath)) {
+            $score += 35
+            $reasons += "Removable drive execution"
+        }
+        if ($entry.LastSeen -and (Test-NearAnyTime -Time $entry.LastSeen -Times $script:GameSessionTimes -Minutes 45)) {
+            $score += 25
+            $reasons += "Near SCUM/BattlEye session"
+        }
+        if ($entry.LastSeen -and (Test-NearAnyTime -Time $entry.LastSeen -Times $script:UsbTimes -Minutes 45)) {
+            $score += 15
+            $reasons += "Near USB activity"
+        }
+        if ($entry.LastSeen -and (Test-NearAnyTime -Time $entry.LastSeen -Times $script:AntiForensicTimes -Minutes 60)) {
+            $score += 20
+            $reasons += "Near anti-forensic event"
+        }
+        if ($trust.Trusted -and (Test-SafePath $primaryPath)) {
+            $score -= 25
+            $reasons += "Trusted publisher and trusted path reduced score"
+        }
+        elseif ($primaryPath -and -not $trust.Signed) {
+            $score += 10
+            $reasons += "Unsigned or unavailable signature"
+        }
+
+        $score = [Math]::Max(0, [Math]::Min(100, $score))
+        $uniqueReasons = @($reasons | Where-Object { $_ } | Select-Object -Unique)
+        $show = $IncludeLowConfidence -or $score -ge 40
+
+        if ($show) {
+            Add-Evidence -Time $entry.LastSeen -Category "CorrelatedExecution" -Source ($entry.Sources -join ",") -ExeName $entry.Name -Path $primaryPath -ParentPath $primaryParentPath -UserSid $primaryUserSid -Confidence $score -Reasons $uniqueReasons -Details $entry.Name | Out-Null
+
+            $script:Report.Add("[!] Correlated execution")
+            $script:Report.Add("Executable: $($entry.Name)")
+            $script:Report.Add("Confidence: $score")
+            $script:Report.Add("Sources: $($entry.Sources -join ', ')")
+            if ($primaryPath) { $script:Report.Add("Path: $primaryPath") }
+            $script:Report.Add("Last seen: $($entry.LastSeen)")
+            $script:Report.Add("Signature: $($trust.Status) / $($trust.Publisher)")
+            $script:Report.Add("Reasons: $($uniqueReasons -join '; ')")
+            $script:Report.Add("")
+        }
+    }
+}
+
+function Write-Summary {
+    $high = @($script:Evidence | Where-Object { $_.Confidence -ge 70 }).Count
+    $medium = @($script:Evidence | Where-Object { $_.Confidence -ge 40 -and $_.Confidence -lt 70 }).Count
+    $low = @($script:Evidence | Where-Object { $_.Confidence -lt 40 }).Count
+
+    $header = New-Object System.Collections.Generic.List[string]
+    $header.Add("TraceUSB forensic report")
+    $header.Add("Generated: $(Get-Date)")
+    $header.Add("LookbackHours: $LookbackHours")
+    $header.Add("High confidence: $high")
+    $header.Add("Medium confidence: $medium")
+    $header.Add("Low/context evidence: $low")
+    $header.Add("")
+    $header.Add("Important: confidence indicates forensic relevance, not proof of cheating.")
+    $header.Add("")
+
+    $script:Report.InsertRange(0, $header)
+}
+
+function Get-SeverityName {
+    param([int]$Confidence)
+
+    if ($Confidence -ge 70) { return "alert" }
+    if ($Confidence -ge 40) { return "notice" }
+    return "info"
+}
+
+function Convert-HexColorToInt {
+    param(
+        [string]$Hex,
+        [string]$Fallback = "4E7DD9"
+    )
+
+    $clean = ($Hex -replace '#', '').Trim()
+    if ($clean -notmatch '^[0-9A-Fa-f]{6}$') {
+        $clean = $Fallback
+    }
+
+    return [Convert]::ToInt32($clean, 16)
+}
+
+function Get-DiscordColor {
+    param([int]$HighestConfidence)
+
+    if ($HighestConfidence -ge 70) {
+        return Convert-HexColorToInt -Hex $DiscordAlertColor -Fallback "D64545"
+    }
+    if ($HighestConfidence -ge 40) {
+        return Convert-HexColorToInt -Hex $DiscordNoticeColor -Fallback "E0A33A"
+    }
+
+    return Convert-HexColorToInt -Hex $DiscordInfoColor -Fallback "4E7DD9"
+}
+
+function Limit-Text {
+    param(
+        [string]$Text,
+        [int]$MaxLength = 900
+    )
+
+    if (-not $Text) { return "" }
+    if ($Text.Length -le $MaxLength) { return $Text }
+    return $Text.Substring(0, [Math]::Max(0, $MaxLength - 3)) + "..."
+}
+
+function Get-EvidenceTranslation {
+    param($Evidence)
+
+    $category = [string]$Evidence.Category
+    $source = [string]$Evidence.Source
+    $reasons = @($Evidence.Reasons)
+    $reasonText = ($reasons -join " | ")
+
+    $meaning = "Evidencia contextual coletada pelo TraceUSB."
+    $operatorAction = "Revisar junto com os demais sinais e horario da sessao."
+    $falsePositive = "Pode ser normal se aparecer isolado."
+
+    if ($category -eq "CorrelatedExecution") {
+        $meaning = "Execucao apareceu em mais de uma fonte do Windows, aumentando relevancia forense."
+        $operatorAction = "Verifique caminho, assinatura, horario e proximidade com sessao SCUM/BattlEye."
+        $falsePositive = "Instaladores, atualizadores e ferramentas legitimas tambem podem aparecer correlacionados."
+    }
+    elseif ($category -eq "Execution") {
+        $meaning = "Processo recente com caracteristicas incomuns ou origem relevante."
+        $operatorAction = "Compare o executavel com USB, pasta temporaria, assinatura e processo pai."
+        $falsePositive = "Ferramentas portateis e launchers legitimos podem gerar esse sinal."
+    }
+    elseif ($category -eq "Defender") {
+        $meaning = "Microsoft Defender registrou deteccao, acao, falha ou alteracao de protecao."
+        $operatorAction = "Abrir o evento original e conferir ameaca, caminho e decisao tomada."
+        $falsePositive = "Cracks, trainers genericos e ferramentas administrativas podem ser detectados sem relacao com SCUM."
+    }
+    elseif ($category -eq "AntiForensic") {
+        $meaning = "Evento associado a limpeza de logs ou reducao de visibilidade historica."
+        $operatorAction = "Tratar como sinal forte quando ocorrer perto de execucao suspeita ou sessao de jogo."
+        $falsePositive = "Rotinas administrativas podem limpar logs legitimamente."
+    }
+    elseif ($category -eq "Service") {
+        $meaning = "Servico ou driver foi instalado no periodo analisado."
+        $operatorAction = "Verificar se o servico e conhecido, assinado e esperado para o usuario."
+        $falsePositive = "Drivers de perifericos, VPN, anti-cheat e atualizadores podem instalar servicos."
+    }
+    elseif ($category -eq "RuntimeContext") {
+        $meaning = "Runtime, overlay ou ecossistema grafico comum estava ativo."
+        $operatorAction = "Usar como contexto. Nao tratar como suspeito isoladamente."
+        $falsePositive = "NVIDIA, AMD, Steam, Discord, RTSS e similares sao comuns em jogadores legitimos."
+    }
+    elseif ($category -eq "USB") {
+        $meaning = "Dispositivo USB conectado ou removido no periodo analisado."
+        $operatorAction = "Correlacionar com execucao de arquivos removiveis e horario da partida."
+        $falsePositive = "Headsets, teclados, mouses e pendrives legitimos aparecem normalmente."
+    }
+    elseif ($category -eq "GameContext") {
+        $meaning = "Processo SCUM ou BattlEye observado e usado como ancora temporal."
+        $operatorAction = "Usar apenas para correlacao de horario."
+        $falsePositive = "Este sinal e esperado quando o jogador abriu o jogo."
+    }
+    elseif ($category -eq "BrowserHistory") {
+        $meaning = "Historico de navegador teve correspondencia com palavras-chave configuradas."
+        $operatorAction = "Revisar apenas os hits filtrados no anexo de historico; nao inferir culpa por busca isolada."
+        $falsePositive = "Pesquisa curiosa, noticia, denuncia ou discussao em forum pode conter as mesmas palavras."
+    }
+
+    if ($reasonText -match "Removable|USB|remov") {
+        $operatorAction += " Priorize checar se houve loader em unidade removivel."
+    }
+    if ($reasonText -match "SCUM|BattlEye") {
+        $operatorAction += " O achado ocorreu perto da janela de jogo."
+    }
+    if ($reasonText -match "Unsigned|signature|assinatura") {
+        $operatorAction += " Assinatura ausente aumenta a necessidade de revisao manual."
+    }
+
+    return [PSCustomObject]@{
+        Category       = $category
+        Source         = $source
+        Confidence     = $Evidence.Confidence
+        Severity       = Get-SeverityName -Confidence $Evidence.Confidence
+        Subject        = @($Evidence.ExeName, $Evidence.Path, $Evidence.Device, $Evidence.Details) | Where-Object { $_ } | Select-Object -First 1
+        Translation    = $meaning
+        OperatorAction = $operatorAction
+        FalsePositive  = $falsePositive
+        Reasons        = $reasons
+    }
+}
+
+function Get-TranslationSuggestions {
+    $items = @(
+        $script:Evidence |
+            Where-Object { $DiscordIncludeLowConfidence -or $_.Confidence -ge 40 } |
+            Sort-Object Confidence -Descending |
+            Select-Object -First 30 |
+            ForEach-Object { Get-EvidenceTranslation $_ }
+    )
+
+    return $items
+}
+
+function Get-TranslationSuggestionLines {
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("TraceUSB suggested translations")
+    $lines.Add("Generated: $(Get-Date)")
+    $lines.Add("Meaning: interpretacao humana de evidencia forense. Nao e prova automatica de cheat.")
+    $lines.Add("")
+
+    foreach ($item in Get-TranslationSuggestions) {
+        $lines.Add("[$($item.Severity.ToUpperInvariant())] $($item.Category) / $($item.Source)")
+        if ($item.Subject) { $lines.Add("Subject: $($item.Subject)") }
+        $lines.Add("Translation: $($item.Translation)")
+        $lines.Add("Operator action: $($item.OperatorAction)")
+        $lines.Add("False-positive note: $($item.FalsePositive)")
+        if ($item.Reasons.Count -gt 0) {
+            $lines.Add("Reasons: $($item.Reasons -join '; ')")
+        }
+        $lines.Add("")
+    }
+
+    return @($lines)
+}
+
+function Add-DiscordAttachment {
+    param(
+        [string]$FileName,
+        [string[]]$Lines,
+        [string]$ContentType = "text/plain; charset=utf-8",
+        [string]$LocalPath
+    )
+
+    if (-not $Lines) {
+        $Lines = @("")
+    }
+
+    $content = ($Lines -join "`r`n")
+    $script:DiscordAttachments.Add([PSCustomObject]@{
+        FileName    = $FileName
+        Content     = $content
+        ContentType = $ContentType
+    })
+
+    if ($SaveDiscordAttachmentsLocal -and $LocalPath) {
+        Set-Content -LiteralPath $LocalPath -Value $Lines -Encoding UTF8
+    }
+}
+
+function Get-EvidenceJsonLines {
+    return @(
+        $script:Evidence |
+            Sort-Object Time |
+            ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 6 }
+    )
+}
+
+function Resolve-SqliteCli {
+    if ($SQLiteCliPath -and (Test-Path -LiteralPath $SQLiteCliPath)) {
+        return $SQLiteCliPath
+    }
+
+    try {
+        $cmd = Get-Command sqlite3.exe -ErrorAction SilentlyContinue
+        if ($cmd -and $cmd.Source) { return $cmd.Source }
+    }
+    catch {}
+
+    try {
+        $cmd = Get-Command sqlite3 -ErrorAction SilentlyContinue
+        if ($cmd -and $cmd.Source) { return $cmd.Source }
+    }
+    catch {}
+
+    return $null
+}
+
+function Redact-Url {
+    param([string]$Url)
+
+    if (-not $Url) { return "" }
+    if ($NoRedactUrls) { return $Url }
+
+    try {
+        $uri = [Uri]$Url
+        $path = $uri.AbsolutePath
+        if (-not $path) { $path = "/" }
+        if ($uri.Query) {
+            return "$($uri.Scheme)://$($uri.Host)$path?query_redacted=true"
+        }
+        return "$($uri.Scheme)://$($uri.Host)$path"
+    }
+    catch {
+        return ($Url -replace '\?.*$', '?query_redacted=true')
+    }
+}
+
+function Limit-HistoryText {
+    param(
+        [string]$Text,
+        [int]$MaxLength = 240
+    )
+
+    if (-not $Text) { return "" }
+    $clean = ($Text -replace "`r|`n", " ").Trim()
+    if ($clean.Length -le $MaxLength) { return $clean }
+    return $clean.Substring(0, $MaxLength - 3) + "..."
+}
+
+function Find-BrowserHistoryKeyword {
+    param(
+        [string]$Url,
+        [string]$Title
+    )
+
+    $haystack = "$Url $Title"
+    foreach ($keyword in $BrowserHistoryKeywords) {
+        if (-not $keyword) { continue }
+        if ($haystack -match [regex]::Escape($keyword)) {
+            return $keyword
+        }
+    }
+
+    return $null
+}
+
+function Invoke-SqliteCsv {
+    param(
+        [string]$SqlitePath,
+        [string]$DatabasePath,
+        [string]$Query
+    )
+
+    $output = & $SqlitePath -readonly -header -csv $DatabasePath $Query 2>$null
+    if (-not $output) { return @() }
+
+    try {
+        return @($output | ConvertFrom-Csv)
+    }
+    catch {
+        return @()
+    }
+}
+
+function Get-ChromiumHistoryDatabases {
+    $items = New-Object System.Collections.Generic.List[object]
+    $roots = @(
+        @{ Browser = "Chrome"; Root = Join-Path $env:LOCALAPPDATA "Google\Chrome\User Data" },
+        @{ Browser = "Edge"; Root = Join-Path $env:LOCALAPPDATA "Microsoft\Edge\User Data" },
+        @{ Browser = "Brave"; Root = Join-Path $env:LOCALAPPDATA "BraveSoftware\Brave-Browser\User Data" }
+    )
+
+    foreach ($entry in $roots) {
+        if (-not (Test-Path -LiteralPath $entry.Root)) { continue }
+        Get-ChildItem -LiteralPath $entry.Root -Directory |
+            Where-Object { $_.Name -eq "Default" -or $_.Name -like "Profile *" } |
+            ForEach-Object {
+                $historyPath = Join-Path $_.FullName "History"
+                if (Test-Path -LiteralPath $historyPath) {
+                    $items.Add([PSCustomObject]@{
+                        Browser = $entry.Browser
+                        Profile = $_.Name
+                        Path    = $historyPath
+                        Type    = "Chromium"
+                    })
                 }
             }
+    }
 
+    $operaHistory = Join-Path $env:APPDATA "Opera Software\Opera Stable\History"
+    if (Test-Path -LiteralPath $operaHistory) {
+        $items.Add([PSCustomObject]@{
+            Browser = "Opera"
+            Profile = "Default"
+            Path    = $operaHistory
+            Type    = "Chromium"
+        })
+    }
+
+    return @($items)
+}
+
+function Get-FirefoxHistoryDatabases {
+    $items = New-Object System.Collections.Generic.List[object]
+    $profilesRoot = Join-Path $env:APPDATA "Mozilla\Firefox\Profiles"
+    if (-not (Test-Path -LiteralPath $profilesRoot)) { return @() }
+
+    Get-ChildItem -LiteralPath $profilesRoot -Directory |
+        ForEach-Object {
+            $placesPath = Join-Path $_.FullName "places.sqlite"
+            if (Test-Path -LiteralPath $placesPath) {
+                $items.Add([PSCustomObject]@{
+                    Browser = "Firefox"
+                    Profile = $_.Name
+                    Path    = $placesPath
+                    Type    = "Firefox"
+                })
+            }
+        }
+
+    return @($items)
+}
+
+function Get-FilteredHistoryLines {
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("TraceUSB filtered browser history")
+    $lines.Add("Generated: $(Get-Date)")
+    $lines.Add("Privacy: only keyword matches are included; full browser history is not exported.")
+    $lines.Add("LookbackDays: $BrowserHistoryLookbackDays")
+    $lines.Add("Keywords: $($BrowserHistoryKeywords -join ', ')")
+    $lines.Add("")
+
+    if (-not $EnableBrowserHistoryScan) {
+        $lines.Add("Browser history scan disabled. Use -EnableBrowserHistoryScan to enable.")
+        return @($lines)
+    }
+
+    $sqlite = Resolve-SqliteCli
+    if (-not $sqlite) {
+        $lines.Add("Browser history scan skipped: sqlite3.exe was not found. Provide -SQLiteCliPath or add sqlite3 to PATH.")
+        Add-Evidence -Time (Get-Date) -Category "BrowserHistory" -Source "BrowserHistoryScan" -Confidence 10 -Reasons @("Browser history scan requested but SQLite reader unavailable") -Details "sqlite3.exe unavailable" | Out-Null
+        return @($lines)
+    }
+
+    $databases = @()
+    $databases += Get-ChromiumHistoryDatabases
+    $databases += Get-FirefoxHistoryDatabases
+
+    if ($databases.Count -eq 0) {
+        $lines.Add("No supported browser history databases were found.")
+        return @($lines)
+    }
+
+    $tempRoot = Join-Path $env:TEMP ("TraceUSB-history-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+
+    try {
+        foreach ($db in $databases) {
+            if ($script:FilteredHistoryHits.Count -ge $BrowserHistoryMaxHits) { break }
+
+            $copyPath = Join-Path $tempRoot ("history_" + [guid]::NewGuid().ToString("N") + ".sqlite")
+            try {
+                Copy-Item -LiteralPath $db.Path -Destination $copyPath -Force
+            }
+            catch {
+                continue
+            }
+
+            if ($db.Type -eq "Chromium") {
+                $query = "SELECT datetime((visits.visit_time/1000000)-11644473600,'unixepoch','localtime') AS visit_time, urls.url AS url, urls.title AS title FROM urls JOIN visits ON urls.id=visits.url WHERE visits.visit_time >= ((strftime('%s','now') - ($BrowserHistoryLookbackDays*86400) + 11644473600)*1000000) ORDER BY visits.visit_time DESC LIMIT 5000;"
+            }
+            else {
+                $query = "SELECT datetime(moz_historyvisits.visit_date/1000000,'unixepoch','localtime') AS visit_time, moz_places.url AS url, moz_places.title AS title FROM moz_places JOIN moz_historyvisits ON moz_places.id=moz_historyvisits.place_id WHERE moz_historyvisits.visit_date >= ((strftime('%s','now') - ($BrowserHistoryLookbackDays*86400))*1000000) ORDER BY moz_historyvisits.visit_date DESC LIMIT 5000;"
+            }
+
+            $rows = Invoke-SqliteCsv -SqlitePath $sqlite -DatabasePath $copyPath -Query $query
+
+            foreach ($row in $rows) {
+                if ($script:FilteredHistoryHits.Count -ge $BrowserHistoryMaxHits) { break }
+
+                $keyword = Find-BrowserHistoryKeyword -Url $row.url -Title $row.title
+                if (-not $keyword) { continue }
+
+                $hit = [PSCustomObject]@{
+                    Browser = $db.Browser
+                    Profile = $db.Profile
+                    Time    = $row.visit_time
+                    Keyword = $keyword
+                    Url     = Redact-Url $row.url
+                    Title   = Limit-HistoryText $row.title
+                }
+                $script:FilteredHistoryHits.Add($hit)
+            }
+        }
+    }
+    finally {
+        try { Remove-Item -LiteralPath $tempRoot -Recurse -Force } catch {}
+    }
+
+    if ($script:FilteredHistoryHits.Count -eq 0) {
+        $lines.Add("No browser history keyword matches were found.")
+        return @($lines)
+    }
+
+    $lines.Add("Matches: $($script:FilteredHistoryHits.Count)")
+    $lines.Add("")
+
+    foreach ($hit in $script:FilteredHistoryHits) {
+        $lines.Add("Browser: $($hit.Browser)")
+        $lines.Add("Profile: $($hit.Profile)")
+        $lines.Add("Time: $($hit.Time)")
+        $lines.Add("Keyword: $($hit.Keyword)")
+        $lines.Add("URL: $($hit.Url)")
+        if ($hit.Title) { $lines.Add("Title: $($hit.Title)") }
+        $lines.Add("")
+    }
+
+    Add-Evidence -Time (Get-Date) -Category "BrowserHistory" -Source "BrowserHistoryScan" -Confidence 45 -Reasons @("Filtered browser history keyword matches found") -Details "$($script:FilteredHistoryHits.Count) filtered browser history hit(s)" | Out-Null
+
+    return @($lines)
+}
+
+function Build-DiscordEmbedPayload {
+    $visibleEvidence = @(
+        $script:Evidence |
+            Where-Object { $DiscordIncludeLowConfidence -or $_.Confidence -ge 40 } |
+            Sort-Object -Property Confidence, Time -Descending
+    )
+
+    $high = @($script:Evidence | Where-Object { $_.Confidence -ge 70 }).Count
+    $medium = @($script:Evidence | Where-Object { $_.Confidence -ge 40 -and $_.Confidence -lt 70 }).Count
+    $low = @($script:Evidence | Where-Object { $_.Confidence -lt 40 }).Count
+    $highest = 0
+    if ($visibleEvidence.Count -gt 0) {
+        $highest = ($visibleEvidence | Select-Object -First 1).Confidence
+    }
+
+    $fields = New-Object System.Collections.Generic.List[object]
+    $fields.Add(@{
+        name = "Resumo"
+        value = "Alta: $high | Media: $medium | Contexto/baixa: $low`nJanela: $LookbackHours hora(s)`nGerado: $($script:RunStamp)"
+        inline = $false
+    })
+    $fields.Add(@{
+        name = "Arquivos locais"
+        value = "$($script:ReportFileName)`n$($script:TimelineFileName)"
+        inline = $true
+    })
+    $attachmentNames = @($script:DiscordAttachments | Select-Object -ExpandProperty FileName)
+    if ($attachmentNames.Count -gt 0) {
+        $fields.Add(@{
+            name = "Anexos Discord"
+            value = (Limit-Text -Text ($attachmentNames -join "`n") -MaxLength 900)
+            inline = $true
+        })
+    }
+    $fields.Add(@{
+        name = "Criterio"
+        value = "Score = relevancia forense. Nao e prova automatica de cheat."
+        inline = $true
+    })
+
+    foreach ($evidence in @($visibleEvidence | Select-Object -First $DiscordMaxItems)) {
+        $translation = Get-EvidenceTranslation $evidence
+        $subject = $translation.Subject
+        if (-not $subject) { $subject = "N/A" }
+
+        $timeText = if ($evidence.Time) { [datetime]$evidence.Time } else { "N/A" }
+        $reasonText = @($evidence.Reasons | Select-Object -First 4) -join "; "
+        $value = "Score: $($evidence.Confidence) ($($translation.Severity))`nQuando: $timeText`nAlvo: $subject`nLeitura: $($translation.Translation)`nAcao: $($translation.OperatorAction)"
+        if ($reasonText) {
+            $value += "`nMotivos: $reasonText"
+        }
+
+        $fields.Add(@{
+            name = (Limit-Text -Text "$($evidence.Category) / $($evidence.Source)" -MaxLength 250)
+            value = (Limit-Text -Text $value -MaxLength 1000)
+            inline = $false
+        })
+    }
+
+    $description = [string]$DiscordSubtitle
+    if (-not $description) {
+        $description = "TraceUSB generated a local forensic report."
+    }
+
+    $embed = @{
+        title = [string]$DiscordTitle
+        description = (Limit-Text -Text $description -MaxLength 350)
+        color = [int](Get-DiscordColor -HighestConfidence $highest)
+        fields = @($fields.ToArray())
+        footer = @{
+            text = "TraceUSB local forensic analyzer"
+        }
+        timestamp = (Get-Date).ToUniversalTime().ToString("o")
+    }
+
+    return @{
+        username = $DiscordUsername
+        embeds = @($embed)
+    }
+}
+
+function Write-DiscordPreview {
+    param($Payload)
+
+    if (-not $DiscordPreviewPath) { return }
+
+    $previewFullPath = $DiscordPreviewPath
+    if (-not [System.IO.Path]::IsPathRooted($previewFullPath)) {
+        $previewFullPath = Join-Path $script:OutputDirectory $previewFullPath
+    }
+
+    $previewExtension = [System.IO.Path]::GetExtension($previewFullPath)
+    if (-not $previewExtension) {
+        $previewFullPath = Join-Path $previewFullPath "discord_preview_$($script:ArtifactSuffix).html"
+    }
+    else {
+        $previewDirectory = Split-Path -Parent $previewFullPath
+        $previewBaseName = [System.IO.Path]::GetFileNameWithoutExtension($previewFullPath)
+        if ($previewBaseName -notmatch '\d{8}_\d{6}') {
+            $previewFullPath = Join-Path $previewDirectory "$($previewBaseName)_$($script:ArtifactSuffix)$previewExtension"
+        }
+    }
+
+    $previewDir = Split-Path -Parent $previewFullPath
+    if ($previewDir -and -not (Test-Path -LiteralPath $previewDir)) {
+        New-Item -ItemType Directory -Path $previewDir -Force | Out-Null
+    }
+
+    $embed = $Payload.embeds[0]
+    $colorHex = "#{0:X6}" -f [int]$embed.color
+    $encodedTitle = [System.Net.WebUtility]::HtmlEncode([string]$embed.title)
+    $encodedDescription = [System.Net.WebUtility]::HtmlEncode([string]$embed.description)
+    $fieldHtml = New-Object System.Collections.Generic.List[string]
+
+    foreach ($field in $embed.fields) {
+        $fieldName = [System.Net.WebUtility]::HtmlEncode([string]$field.name)
+        $fieldValue = [System.Net.WebUtility]::HtmlEncode([string]$field.value) -replace "`r?`n", "<br>"
+        $fieldHtml.Add("<div class='field'><div class='field-name'>$fieldName</div><div class='field-value'>$fieldValue</div></div>")
+    }
+
+    $attachmentHtml = New-Object System.Collections.Generic.List[string]
+    foreach ($attachment in $script:DiscordAttachments) {
+        $attachmentName = [System.Net.WebUtility]::HtmlEncode([string]$attachment.FileName)
+        $attachmentBytes = [Text.Encoding]::UTF8.GetByteCount([string]$attachment.Content)
+        $attachmentHtml.Add("<li>$attachmentName <span class='bytes'>($attachmentBytes bytes)</span></li>")
+    }
+
+    $html = @"
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>TraceUSB Discord Preview</title>
+<style>
+body { background:#313338; color:#dbdee1; font-family:Segoe UI, Arial, sans-serif; padding:24px; }
+.message { max-width:760px; }
+.username { color:#f2f3f5; font-weight:700; margin-bottom:8px; }
+.embed { background:#2b2d31; border-left:5px solid $colorHex; border-radius:4px; padding:16px; box-shadow:0 1px 2px rgba(0,0,0,.25); }
+.title { color:#f2f3f5; font-size:18px; font-weight:700; margin-bottom:8px; }
+.description { color:#dbdee1; margin-bottom:14px; line-height:1.35; }
+.field { margin-top:12px; }
+.field-name { color:#f2f3f5; font-weight:700; margin-bottom:4px; }
+.field-value { color:#dbdee1; line-height:1.35; white-space:normal; }
+.attachments { margin-top:16px; border-top:1px solid #404249; padding-top:12px; }
+.attachments-title { color:#f2f3f5; font-weight:700; margin-bottom:6px; }
+.attachments ul { margin:0; padding-left:18px; }
+.bytes { color:#949ba4; }
+.footer { color:#949ba4; font-size:12px; margin-top:14px; }
+</style>
+</head>
+<body>
+<div class="message">
+<div class="username">$([System.Net.WebUtility]::HtmlEncode([string]$Payload.username))</div>
+<div class="embed">
+<div class="title">$encodedTitle</div>
+<div class="description">$encodedDescription</div>
+$($fieldHtml -join "`n")
+<div class="attachments">
+<div class="attachments-title">Arquivos anexados no webhook</div>
+<ul>
+$($attachmentHtml -join "`n")
+</ul>
+</div>
+<div class="footer">$([System.Net.WebUtility]::HtmlEncode([string]$embed.footer.text))</div>
+</div>
+</div>
+</body>
+</html>
+"@
+
+    Set-Content -LiteralPath $previewFullPath -Value $html -Encoding UTF8
+}
+
+function Convert-SecureStringToPlainText {
+    param([Security.SecureString]$SecureString)
+
+    if (-not $SecureString) { return $null }
+
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
+    try {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    }
+    finally {
+        if ($bstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+    }
+}
+
+function Save-DiscordWebhookSecret {
+    if (-not $DiscordWebhookSecretPath) {
+        throw "-DiscordWebhookSecretPath is required with -SaveDiscordWebhookSecret."
+    }
+    if (-not $DiscordWebhookUrl) {
+        throw "-DiscordWebhookUrl is required with -SaveDiscordWebhookSecret."
+    }
+
+    $secretFullPath = $DiscordWebhookSecretPath
+    if (-not [System.IO.Path]::IsPathRooted($secretFullPath)) {
+        $secretFullPath = Join-Path $script:OutputDirectory $secretFullPath
+    }
+
+    $secretDir = Split-Path -Parent $secretFullPath
+    if ($secretDir -and -not (Test-Path -LiteralPath $secretDir)) {
+        New-Item -ItemType Directory -Path $secretDir -Force | Out-Null
+    }
+
+    $secure = ConvertTo-SecureString -String $DiscordWebhookUrl -AsPlainText -Force
+    $encrypted = $secure | ConvertFrom-SecureString
+    Set-Content -LiteralPath $secretFullPath -Value $encrypted -Encoding UTF8
+
+    Write-Host "Discord webhook secret saved with Windows DPAPI: $secretFullPath"
+    Write-Host "This file can only be decrypted by the same Windows user profile on this machine."
+}
+
+function Get-DiscordWebhookUrl {
+    if ($DiscordWebhookUrl) {
+        return $DiscordWebhookUrl
+    }
+
+    if ($DiscordWebhookSecretPath) {
+        $secretFullPath = $DiscordWebhookSecretPath
+        if (-not [System.IO.Path]::IsPathRooted($secretFullPath)) {
+            $secretFullPath = Join-Path $script:OutputDirectory $secretFullPath
+        }
+
+        if (Test-Path -LiteralPath $secretFullPath) {
+            try {
+                $encrypted = (Get-Content -Raw -LiteralPath $secretFullPath).Trim()
+                $secure = $encrypted | ConvertTo-SecureString
+                $plain = Convert-SecureStringToPlainText -SecureString $secure
+                if ($plain) { return $plain }
+            }
+            catch {
+                $script:Report.Add("")
+                $script:Report.Add("Discord webhook secret could not be decrypted: $($_.Exception.Message)")
+            }
+        }
+        else {
+            $script:Report.Add("")
+            $script:Report.Add("Discord webhook secret file not found: $secretFullPath")
+        }
+    }
+
+    if ($DiscordWebhookEnvVar) {
+        if ($DiscordWebhookEnvVar -match '^https://') {
+            return $DiscordWebhookEnvVar
+        }
+
+        try {
+            $envValue = [Environment]::GetEnvironmentVariable($DiscordWebhookEnvVar, "Process")
+            if (-not $envValue) {
+                $envValue = [Environment]::GetEnvironmentVariable($DiscordWebhookEnvVar, "User")
+            }
+            if (-not $envValue) {
+                $envValue = [Environment]::GetEnvironmentVariable($DiscordWebhookEnvVar, "Machine")
+            }
+            if ($envValue) { return $envValue }
         }
         catch {}
     }
+
+    return $null
 }
 
-# ======================================
-# OUTPUT FINAL
-# ======================================
+function Send-DiscordWebhook {
+    param($Payload)
 
-foreach ($entry in $correlatedExecutions.Values) {
+    if (-not $EnableDiscordWebhook) { return }
 
-    $sources = $entry.Sources | Select-Object -Unique
+    $resolvedWebhookUrl = Get-DiscordWebhookUrl
 
-    # Apenas correlacionados
-    if ($sources.Count -lt 2) {
-        continue
+    if (-not $resolvedWebhookUrl) {
+        $script:Report.Add("")
+        $script:Report.Add("Discord webhook skipped: no URL, DPAPI secret, or environment variable was available.")
+        return
     }
 
-    # Ignore executáveis muito comuns
-    $skip = $false
+    try {
+        Add-Type -AssemblyName System.Net.Http
 
-    foreach ($safe in $knownPublishers) {
+        $client = New-Object System.Net.Http.HttpClient
+        $multipart = New-Object System.Net.Http.MultipartFormDataContent
 
-        if ($entry.Name -match $safe) {
-            $skip = $true
-            break
+        $payloadJson = $Payload | ConvertTo-Json -Depth 10
+        $payloadContent = New-Object System.Net.Http.StringContent($payloadJson, [Text.Encoding]::UTF8, "application/json")
+        $multipart.Add($payloadContent, "payload_json")
+
+        $index = 0
+        foreach ($attachment in @($script:DiscordAttachments)) {
+            if (-not $attachment -or -not $attachment.FileName) { continue }
+
+            $bytes = [Text.Encoding]::UTF8.GetBytes([string]$attachment.Content)
+            $fileContent = New-Object -TypeName System.Net.Http.ByteArrayContent -ArgumentList (,$bytes)
+            if ($attachment.ContentType) {
+                $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse([string]$attachment.ContentType)
+            }
+            $multipart.Add($fileContent, "files[$index]", [string]$attachment.FileName)
+            $index++
         }
+
+        $response = $client.PostAsync($resolvedWebhookUrl, $multipart).GetAwaiter().GetResult()
+        if (-not $response.IsSuccessStatusCode) {
+            $responseText = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            throw "Discord returned HTTP $([int]$response.StatusCode): $responseText"
+        }
+
+        $script:Report.Add("")
+        $script:Report.Add("Discord webhook sent with $index attachment(s).")
     }
-
-    if ($skip) {
-        continue
+    catch {
+        $script:Report.Add("")
+        $script:Report.Add("Discord webhook failed: $($_.Exception.Message)")
     }
-
-    $pathTrusted = $false
-
-foreach ($safePath in $knownSafePaths) {
-
-    if ($entry.Path -like "$safePath*") {
-        $pathTrusted = $true
-        break
-    }
-}
-
-if ($pathTrusted -and -not $entry.Suspicious) {
-    continue
-}
-
-    $result.Add("[!] Execucao correlacionada detectada")
-    $result.Add("Executavel: $($entry.Name)")
-    $result.Add("Fontes: $($sources -join ', ')")
-    $result.Add("Ultima atividade: $($entry.LastSeen)")
-
-    if ($entry.Suspicious) {
-        $result.Add("Indicadores: Nome incomum/transitorio")
-    }
-
-    $result.Add("")
-
-    Add-TimelineEvent `
-        -Time $entry.LastSeen `
-        -Tipo "CORRELATION" `
-        -Evento "Execucao correlacionada" `
-        -Detalhes $entry.Name
-}
-
-# ======================================
-# 11. GPU RUNTIME DETECTION
-# ======================================
-
-Write-Section "GPU OVERLAY DETECTION"
-
-$nvidiaDetected = $false
-$amdDetected = $false
-
-# NVIDIA
-$nvidiaProcesses = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.ProcessName -match "nvidia|nvcontainer|nvsphelper|shadowplay"
-}
-
-if ($nvidiaProcesses) {
-
-    $nvidiaDetected = $true
-
-    $result.Add("[+] NVIDIA overlay/runtime detectado")
-    $result.Add("Processos detectados:")
-
-$nvidiaProcesses |
-Select-Object -ExpandProperty ProcessName -Unique |
-ForEach-Object {
-    $result.Add(" - $_")
-}
-
-$result.Add("")
-
-    Add-TimelineEvent `
-        -Time (Get-Date) `
-        -Tipo "GPU" `
-        -Evento "NVIDIA overlay detectado" `
-        -Detalhes "ShadowPlay / NVIDIA runtime ativo"
-}
-
-# AMD
-$amdProcesses = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.ProcessName -match "radeon|amdow|amdrsserv|relive"
-}
-
-if ($amdProcesses) {
-
-    $amdDetected = $true
-
-    $result.Add("[+] AMD overlay/runtime detectado")
-    $result.Add("Processos detectados:")
-
-$amdProcesses |
-Select-Object -ExpandProperty ProcessName -Unique |
-ForEach-Object {
-    $result.Add(" - $_")
-}
-
-$result.Add("")
-
-    Add-TimelineEvent `
-        -Time (Get-Date) `
-        -Tipo "GPU" `
-        -Evento "AMD overlay detectado" `
-        -Detalhes "AMD ReLive / Radeon runtime ativo"
-}
-
-if (-not $nvidiaDetected -and -not $amdDetected) {
-
-    $result.Add("Nenhum overlay NVIDIA/AMD detectado.")
-    $result.Add("")
-}
-
-# ======================================
-# 12. GPU SCREENSHOT TRIGGER
-# ======================================
-
-if ($nvidiaDetected -or $amdDetected) {
-
-    $result.Add("[*] Preparando captura automatica...")
-    $result.Add("Retorne ao jogo imediatamente.")
-    $result.Add("")
-
-    Add-Type -AssemblyName System.Windows.Forms
-
-    Start-Sleep -Seconds 15
-
-    # NVIDIA
-    if ($nvidiaDetected) {
-
-        [System.Windows.Forms.SendKeys]::SendWait("%{F1}")
-
-        $result.Add("[+] Trigger NVIDIA ALT+F1 enviada")
-        $result.Add("")
-
-        Add-TimelineEvent `
-            -Time (Get-Date) `
-            -Tipo "GPU" `
-            -Evento "NVIDIA screenshot trigger" `
-            -Detalhes "ALT+F1"
-    }
-
-    # AMD
-    elseif ($amdDetected) {
-
-        [System.Windows.Forms.SendKeys]::SendWait("^+i")
-
-        $result.Add("[+] Trigger AMD CTRL+SHIFT+I enviada")
-        $result.Add("")
-
-        Add-TimelineEvent `
-            -Time (Get-Date) `
-            -Tipo "GPU" `
-            -Evento "AMD screenshot trigger" `
-            -Detalhes "CTRL+SHIFT+I"
+    finally {
+        if ($multipart) { $multipart.Dispose() }
+        if ($client) { $client.Dispose() }
     }
 }
 
-# ======================================
-# FINAL
-# ======================================
+function Publish-DiscordArtifacts {
+    $script:DiscordAttachments.Clear()
 
-# Arquivo principal
-[System.IO.File]::WriteAllLines($output, $result, [System.Text.Encoding]::UTF8)
+    $historyLines = $null
+    if ($EnableBrowserHistoryScan) {
+        $historyLines = Get-FilteredHistoryLines
+    }
 
-# Timeline
-$timeline |
-Sort-Object Time |
-ForEach-Object {
+    $evidenceLines = Get-EvidenceJsonLines
+    $translationLines = Get-TranslationSuggestionLines
 
-    "$($_.Time) | [$($_.Tipo)] | $($_.Evento) | $($_.Detalhes)"
+    Add-DiscordAttachment -FileName $script:EvidenceFileName -Lines $evidenceLines -ContentType "application/x-ndjson; charset=utf-8" -LocalPath $script:EvidencePath
+    Add-DiscordAttachment -FileName $script:TranslationsFileName -Lines $translationLines -ContentType "text/plain; charset=utf-8" -LocalPath $script:TranslationsPath
 
-} | Set-Content $timelinePath -Encoding UTF8
+    if ($EnableBrowserHistoryScan) {
+        Add-DiscordAttachment -FileName $script:FilteredHistoryFileName -Lines $historyLines -ContentType "text/plain; charset=utf-8" -LocalPath $script:FilteredHistoryPath
+    }
 
-[System.IO.File]::WriteAllLines($timelinePath, $timelineOutput, [System.Text.Encoding]::UTF8)
+    if (-not $DiscordPreviewPath -and -not $EnableDiscordWebhook) { return }
 
-# Abrir ambos
-Start-Process notepad.exe $output
-Start-Process notepad.exe $timelinePath
+    $payload = Build-DiscordEmbedPayload
+    Write-DiscordPreview -Payload $payload
+    Send-DiscordWebhook -Payload $payload
+}
+
+function Write-Outputs {
+    if (-not (Test-Path -LiteralPath $script:OutputDirectory)) {
+        New-Item -ItemType Directory -Path $script:OutputDirectory -Force | Out-Null
+    }
+
+    Publish-DiscordArtifacts
+    Write-Summary
+
+    [System.IO.File]::WriteAllLines($script:ReportPath, $script:Report, [System.Text.Encoding]::UTF8)
+
+    $timelineLines = @(
+        $script:Timeline |
+            Where-Object { $_.Time } |
+            Sort-Object Time |
+            ForEach-Object {
+                "$($_.Time) | [$($_.Category)] | $($_.Event) | $($_.Details)"
+            }
+    )
+    Set-Content -LiteralPath $script:TimelinePath -Value $timelineLines -Encoding UTF8
+
+}
+
+function Enable-ProcessAuditPolicy {
+    if (-not $EnableAuditPolicy) { return }
+
+    $isAdmin = (
+        New-Object Security.Principal.WindowsPrincipal(
+            [Security.Principal.WindowsIdentity]::GetCurrent()
+        )
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+    if (-not $isAdmin) {
+        Add-Evidence -Time (Get-Date) -Category "Operational" -Source "AuditPolicy" -Confidence 20 -Reasons @("Audit policy requested without administrator rights") -Details "Could not enable Process Creation auditing" | Out-Null
+        return
+    }
+
+    try {
+        auditpol /set /subcategory:"Process Creation" /success:enable /failure:enable | Out-Null
+        Add-Evidence -Time (Get-Date) -Category "Operational" -Source "AuditPolicy" -Confidence 20 -Reasons @("Operator enabled Process Creation auditing") -Details "Process Creation auditing enabled" | Out-Null
+    }
+    catch {
+        Add-Evidence -Time (Get-Date) -Category "Operational" -Source "AuditPolicy" -Confidence 20 -Reasons @("Audit policy change failed") -Details $_.Exception.Message | Out-Null
+    }
+}
+
+if ($SaveDiscordWebhookSecret) {
+    Save-DiscordWebhookSecret
+    return
+}
+
+Enable-ProcessAuditPolicy
+Collect-LogClearingEvents
+Collect-UsbEvents
+Collect-DefenderEvents
+Collect-ProcessEvents
+Collect-PrefetchEvents
+Collect-BamEvents
+Collect-ServiceEvents
+Collect-RuntimeContext
+Complete-Correlation
+Invoke-ScreenshotTrigger
+Write-Outputs
+
+if (-not $NoOpen) {
+    Start-Process notepad.exe $script:ReportPath
+    Start-Process notepad.exe $script:TimelinePath
+}
