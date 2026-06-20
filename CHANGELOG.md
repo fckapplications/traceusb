@@ -23,6 +23,7 @@
 - Added `traceusb_run_*.log` with operational status and Discord delivery diagnostics.
 - Added `-DiscordSelfTest` to validate webhook connectivity and multipart attachment upload without collecting forensic data.
 - Added `-DiscordTimeoutSeconds`, `-DiscordMaxAttachmentBytes`, and `-VerboseConsole` for webhook reliability and `irm ... | iex` visibility.
+- Discord uploads now include `analise_*.txt` and `timeline_*.txt` alongside evidence, translations, and filtered browser-history attachments.
 - Pester tests with mocked Windows telemetry sources.
 
 ### Changed
@@ -33,12 +34,16 @@
 - Sensitive evidence JSONL and translation artifacts are no longer saved locally by default.
 - Local `analise_*.txt` and `timeline_*.txt` are written before Discord delivery is attempted.
 - Discord delivery now forces TLS 1.2 where supported, uses an explicit timeout, and falls back to embed-only delivery if multipart attachments fail.
+- Discord embeds now use a review-priority model and source/category coverage summary instead of showing only the highest raw scores.
+- `-NoOpen` is now opt-in again; local TXT reports open by default after a normal run.
+- Browser-history discovery now scans accessible `C:\Users` profiles, reports detected databases, and distinguishes "no keyword matches" from "no database found".
 
 ### Fixed
 - Timeline events are added through a functional helper.
 - Correlation no longer depends on a missing `Path` property.
 - Publisher/signature trust is used during scoring when a real path is available.
 - Fixed Discord attachment iteration/counting so multipart uploads include the prepared files.
+- Fixed browser-history discovery that could miss installed Chrome/Firefox profiles.
 
 ---
 

@@ -5,7 +5,7 @@ param(
 
     [string]$OutputDirectory = [Environment]::GetFolderPath("Desktop"),
 
-    [switch]$NoOpen = $true,
+    [switch]$NoOpen,
 
     [switch]$EnableAuditPolicy,
 
@@ -1178,6 +1178,114 @@ function Limit-Text {
     return $Text.Substring(0, [Math]::Max(0, $MaxLength - 3)) + "..."
 }
 
+function Test-CommonExecutableName {
+    param([string]$Name)
+
+    if (-not $Name) { return $false }
+    return $Name -match '^(chrome|msedge|firefox|brave|opera|explorer|svchost|conhost|cmd|powershell|pwsh|steam|steamwebhelper|discord|nvidia|nvcontainer|runtimebroker)\.exe$'
+}
+
+function Get-DiscordEvidencePriority {
+    param($Evidence)
+
+    $priority = [int]$Evidence.Confidence
+    $category = [string]$Evidence.Category
+    $source = [string]$Evidence.Source
+    $exeName = [string]$Evidence.ExeName
+    $path = [string]$Evidence.Path
+    $reasonText = (@($Evidence.Reasons) -join " | ")
+
+    switch ($category) {
+        "Defender" { $priority += 45 }
+        "AntiForensic" { $priority += 45 }
+        "BrowserHistory" { $priority += 35 }
+        "Service" { $priority += 30 }
+        "USB" { $priority += 25 }
+        "Execution" { $priority += 20 }
+        "CorrelatedExecution" { $priority += 10 }
+        "GameContext" { $priority -= 30 }
+        "RuntimeContext" { $priority -= 35 }
+    }
+
+    if ($source -match "4688|Security") { $priority += 20 }
+    if ($reasonText -match "Defender|anti-forensic|Log|USB|Removable|SCUM|BattlEye|Suspicious") { $priority += 15 }
+    if ($path -match '^[A-Z]:\\' -and (Test-RemovablePath $path)) { $priority += 25 }
+    if ($path -match '\\AppData\\Local\\Temp\\|\\Downloads\\|\\Desktop\\') { $priority += 10 }
+    if ($source -eq "PREFETCH,BAM") { $priority -= 25 }
+    if ((Test-CommonExecutableName $exeName) -and $source -match "PREFETCH|BAM") { $priority -= 45 }
+
+    return [Math]::Max(0, $priority)
+}
+
+function Get-DiscordSourceSummary {
+    $sourceCounts = @{}
+    $categoryCounts = @{}
+
+    foreach ($item in $script:Evidence) {
+        $category = if ($item.Category) { [string]$item.Category } else { "Unknown" }
+        if (-not $categoryCounts.ContainsKey($category)) { $categoryCounts[$category] = 0 }
+        $categoryCounts[$category]++
+
+        foreach ($source in ([string]$item.Source -split ',')) {
+            $clean = $source.Trim()
+            if (-not $clean) { continue }
+            if (-not $sourceCounts.ContainsKey($clean)) { $sourceCounts[$clean] = 0 }
+            $sourceCounts[$clean]++
+        }
+    }
+
+    $topSources = @(
+        $sourceCounts.GetEnumerator() |
+            Sort-Object Value -Descending |
+            Select-Object -First 6 |
+            ForEach-Object { "$($_.Key): $($_.Value)" }
+    )
+    $topCategories = @(
+        $categoryCounts.GetEnumerator() |
+            Sort-Object Value -Descending |
+            Select-Object -First 6 |
+            ForEach-Object { "$($_.Key): $($_.Value)" }
+    )
+
+    return [PSCustomObject]@{
+        Sources = if ($topSources.Count -gt 0) { $topSources -join " | " } else { "Nenhuma fonte com evidencia." }
+        Categories = if ($topCategories.Count -gt 0) { $topCategories -join " | " } else { "Nenhuma categoria com evidencia." }
+    }
+}
+
+function Get-DiverseDiscordEvidence {
+    param([object[]]$Evidence)
+
+    $selected = New-Object System.Collections.Generic.List[object]
+    $seenKeys = @{}
+
+    $ranked = @(
+        $Evidence |
+            ForEach-Object {
+                [PSCustomObject]@{
+                    Evidence = $_
+                    Priority = Get-DiscordEvidencePriority $_
+                }
+            } |
+            Sort-Object -Property Priority, @{ Expression = { $_.Evidence.Confidence } }, @{ Expression = { $_.Evidence.Time } } -Descending
+    )
+
+    foreach ($item in $ranked) {
+        if ($selected.Count -ge $DiscordMaxItems) { break }
+        $evidence = $item.Evidence
+        $key = "$($evidence.Category)|$($evidence.Source)"
+        if ($seenKeys.ContainsKey($key) -and $item.Priority -lt 90) { continue }
+        $seenKeys[$key] = $true
+        $selected.Add($evidence)
+    }
+
+    if ($selected.Count -eq 0 -and $Evidence.Count -gt 0) {
+        $selected.Add(($Evidence | Select-Object -First 1))
+    }
+
+    return @($selected.ToArray())
+}
+
 function Get-EvidenceTranslation {
     param($Evidence)
 
@@ -1420,7 +1528,173 @@ function Invoke-SqliteCsv {
     }
 }
 
+function Get-BrowserProfileRoots {
+    $roots = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+
+    function Add-BrowserProfileRoot {
+        param(
+            [string]$UserName,
+            [string]$LocalAppData,
+            [string]$RoamingAppData
+        )
+
+        $candidates = @(
+            @{ Browser = "Chrome"; Root = Join-Path $LocalAppData "Google\Chrome\User Data" },
+            @{ Browser = "Edge"; Root = Join-Path $LocalAppData "Microsoft\Edge\User Data" },
+            @{ Browser = "Brave"; Root = Join-Path $LocalAppData "BraveSoftware\Brave-Browser\User Data" },
+            @{ Browser = "Opera"; Root = Join-Path $RoamingAppData "Opera Software\Opera Stable"; Opera = $true },
+            @{ Browser = "Firefox"; Root = Join-Path $RoamingAppData "Mozilla\Firefox\Profiles"; Firefox = $true }
+        )
+
+        foreach ($candidate in $candidates) {
+            if (-not $candidate.Root) { continue }
+            $key = "$($candidate.Browser)|$($candidate.Root)".ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $roots.Add([PSCustomObject]@{
+                UserName = $UserName
+                Browser  = $candidate.Browser
+                Root     = $candidate.Root
+                Opera    = [bool]$candidate.Opera
+                Firefox  = [bool]$candidate.Firefox
+            })
+        }
+    }
+
+    Add-BrowserProfileRoot -UserName $env:USERNAME -LocalAppData $env:LOCALAPPDATA -RoamingAppData $env:APPDATA
+
+    try {
+        Get-ChildItem -LiteralPath "C:\Users" -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notin @("All Users", "Default", "Default User", "Public") } |
+            ForEach-Object {
+                Add-BrowserProfileRoot `
+                    -UserName $_.Name `
+                    -LocalAppData (Join-Path $_.FullName "AppData\Local") `
+                    -RoamingAppData (Join-Path $_.FullName "AppData\Roaming")
+            }
+    }
+    catch {}
+
+    return @($roots.ToArray())
+}
+
 function Get-ChromiumHistoryDatabases {
+    $items = New-Object System.Collections.Generic.List[object]
+    $roots = Get-BrowserProfileRoots | Where-Object { -not $_.Firefox }
+
+    foreach ($entry in $roots) {
+        if (-not (Test-Path -LiteralPath $entry.Root)) { continue }
+
+        if ($entry.Opera) {
+            $historyPath = Join-Path $entry.Root "History"
+            if (Test-Path -LiteralPath $historyPath) {
+                $items.Add([PSCustomObject]@{
+                    Browser = $entry.Browser
+                    Profile = "$($entry.UserName)\Default"
+                    Path    = $historyPath
+                    Type    = "Chromium"
+                })
+            }
+            continue
+        }
+
+        try {
+            Get-ChildItem -LiteralPath $entry.Root -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -eq "Default" -or $_.Name -like "Profile *" -or $_.Name -eq "Guest Profile" } |
+                ForEach-Object {
+                    $historyPath = Join-Path $_.FullName "History"
+                    if (Test-Path -LiteralPath $historyPath) {
+                        $items.Add([PSCustomObject]@{
+                            Browser = $entry.Browser
+                            Profile = "$($entry.UserName)\$($_.Name)"
+                            Path    = $historyPath
+                            Type    = "Chromium"
+                        })
+                    }
+                }
+        }
+        catch {}
+    }
+
+    return @($items.ToArray())
+}
+
+function Get-FirefoxHistoryDatabases {
+    $items = New-Object System.Collections.Generic.List[object]
+    $roots = Get-BrowserProfileRoots | Where-Object { $_.Firefox }
+
+    foreach ($entry in $roots) {
+        if (-not (Test-Path -LiteralPath $entry.Root)) { continue }
+
+        try {
+            Get-ChildItem -LiteralPath $entry.Root -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                    $placesPath = Join-Path $_.FullName "places.sqlite"
+                    if (Test-Path -LiteralPath $placesPath) {
+                        $items.Add([PSCustomObject]@{
+                            Browser = "Firefox"
+                            Profile = "$($entry.UserName)\$($_.Name)"
+                            Path    = $placesPath
+                            Type    = "Firefox"
+                        })
+                    }
+                }
+        }
+        catch {}
+    }
+
+    return @($items.ToArray())
+}
+
+function Get-BrowserHistoryDatabases {
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($db in Get-ChromiumHistoryDatabases) { $items.Add($db) }
+    foreach ($db in Get-FirefoxHistoryDatabases) { $items.Add($db) }
+    return @($items.ToArray())
+}
+
+function Copy-BrowserHistoryDatabase {
+    param(
+        $Database,
+        [string]$Destination
+    )
+
+    try {
+        Copy-Item -LiteralPath $Database.Path -Destination $Destination -Force -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-RunLog "Normal copy failed for browser history $($Database.Browser) $($Database.Profile): $($_.Exception.Message)"
+    }
+
+    try {
+        $source = [System.IO.File]::Open($Database.Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $dest = [System.IO.File]::Create($Destination)
+            try {
+                $source.CopyTo($dest)
+            }
+            finally {
+                $dest.Dispose()
+            }
+        }
+        finally {
+            $source.Dispose()
+        }
+        return $true
+    }
+    catch {
+        Write-RunLog "Shared-read copy failed for browser history $($Database.Browser) $($Database.Profile): $($_.Exception.Message)"
+        return $false
+    }
+}
+
+<#
+Legacy helpers kept intentionally removed from call path by Get-BrowserHistoryDatabases.
+This marker prevents accidental reintroduction of single-user-only browser scans.
+#>
+function Get-ChromiumHistoryDatabases_LegacyDisabled {
     $items = New-Object System.Collections.Generic.List[object]
     $roots = @(
         @{ Browser = "Chrome"; Root = Join-Path $env:LOCALAPPDATA "Google\Chrome\User Data" },
@@ -1458,7 +1732,7 @@ function Get-ChromiumHistoryDatabases {
     return @($items)
 }
 
-function Get-FirefoxHistoryDatabases {
+function Get-FirefoxHistoryDatabases_LegacyDisabled {
     $items = New-Object System.Collections.Generic.List[object]
     $profilesRoot = Join-Path $env:APPDATA "Mozilla\Firefox\Profiles"
     if (-not (Test-Path -LiteralPath $profilesRoot)) { return @() }
@@ -1500,29 +1774,39 @@ function Get-FilteredHistoryLines {
         return @($lines)
     }
 
-    $databases = @()
-    $databases += Get-ChromiumHistoryDatabases
-    $databases += Get-FirefoxHistoryDatabases
+    $databases = @(Get-BrowserHistoryDatabases)
 
     if ($databases.Count -eq 0) {
         $lines.Add("No supported browser history databases were found.")
+        $lines.Add("Checked browser profile roots:")
+        foreach ($root in Get-BrowserProfileRoots) {
+            $exists = Test-Path -LiteralPath $root.Root
+            $lines.Add("- $($root.Browser) [$($root.UserName)]: $($root.Root) (exists=$exists)")
+        }
+        Add-Evidence -Time (Get-Date) -Category "BrowserHistory" -Source "BrowserHistoryScan" -Confidence 10 -Reasons @("Browser history scan found no supported databases") -Details "No Chrome/Edge/Brave/Opera/Firefox history database found in checked profile roots" | Out-Null
         return @($lines)
     }
 
+    $lines.Add("Detected browser history databases: $($databases.Count)")
+    foreach ($db in $databases) {
+        $lines.Add("- $($db.Browser) [$($db.Profile)]")
+    }
+    $lines.Add("")
+
     $tempRoot = Join-Path $env:TEMP ("TraceUSB-history-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    $readableDatabases = 0
 
     try {
         foreach ($db in $databases) {
             if ($script:FilteredHistoryHits.Count -ge $BrowserHistoryMaxHits) { break }
 
             $copyPath = Join-Path $tempRoot ("history_" + [guid]::NewGuid().ToString("N") + ".sqlite")
-            try {
-                Copy-Item -LiteralPath $db.Path -Destination $copyPath -Force
-            }
-            catch {
+            if (-not (Copy-BrowserHistoryDatabase -Database $db -Destination $copyPath)) {
+                $lines.Add("Skipped $($db.Browser) [$($db.Profile)]: could not copy locked or inaccessible database.")
                 continue
             }
+            $readableDatabases++
 
             if ($db.Type -eq "Chromium") {
                 $query = "SELECT datetime((visits.visit_time/1000000)-11644473600,'unixepoch','localtime') AS visit_time, urls.url AS url, urls.title AS title FROM urls JOIN visits ON urls.id=visits.url WHERE visits.visit_time >= ((strftime('%s','now') - ($BrowserHistoryLookbackDays*86400) + 11644473600)*1000000) ORDER BY visits.visit_time DESC LIMIT 5000;"
@@ -1532,6 +1816,9 @@ function Get-FilteredHistoryLines {
             }
 
             $rows = Invoke-SqliteCsv -SqlitePath $sqlite -DatabasePath $copyPath -Query $query
+            if ($rows.Count -eq 0) {
+                $lines.Add("Read $($db.Browser) [$($db.Profile)]: no rows returned in lookback window or SQLite query failed.")
+            }
 
             foreach ($row in $rows) {
                 if ($script:FilteredHistoryHits.Count -ge $BrowserHistoryMaxHits) { break }
@@ -1557,6 +1844,7 @@ function Get-FilteredHistoryLines {
 
     if ($script:FilteredHistoryHits.Count -eq 0) {
         $lines.Add("No browser history keyword matches were found.")
+        $lines.Add("Readable databases: $readableDatabases / $($databases.Count)")
         return @($lines)
     }
 
@@ -1588,6 +1876,7 @@ function Build-DiscordEmbedPayload {
     $high = @($script:Evidence | Where-Object { $_.Confidence -ge 70 }).Count
     $medium = @($script:Evidence | Where-Object { $_.Confidence -ge 40 -and $_.Confidence -lt 70 }).Count
     $low = @($script:Evidence | Where-Object { $_.Confidence -lt 40 }).Count
+    $sourceSummary = Get-DiscordSourceSummary
     $highest = 0
     if ($visibleEvidence.Count -gt 0) {
         $highest = ($visibleEvidence | Select-Object -First 1).Confidence
@@ -1596,45 +1885,57 @@ function Build-DiscordEmbedPayload {
     $fields = New-Object System.Collections.Generic.List[object]
     $fields.Add(@{
         name = "Resumo"
-        value = "Alta: $high | Media: $medium | Contexto/baixa: $low`nJanela: $LookbackHours hora(s)`nGerado: $($script:RunStamp)"
+        value = "Alta: **$high** | Media: **$medium** | Contexto/baixa: **$low**`nJanela analisada: **$LookbackHours hora(s)**`nGerado: $($script:RunStamp)"
         inline = $false
     })
     $fields.Add(@{
-        name = "Arquivos locais"
-        value = "$($script:ReportFileName)`n$($script:TimelineFileName)"
-        inline = $true
+        name = "Cobertura"
+        value = "Categorias: $($sourceSummary.Categories)`nFontes: $($sourceSummary.Sources)"
+        inline = $false
     })
     $attachmentNames = @($script:DiscordAttachments | Select-Object -ExpandProperty FileName)
     if ($attachmentNames.Count -gt 0) {
         $fields.Add(@{
-            name = "Anexos Discord"
-            value = (Limit-Text -Text ($attachmentNames -join "`n") -MaxLength 900)
-            inline = $true
+            name = "Arquivos anexados"
+            value = (Limit-Text -Text (($attachmentNames | ForEach-Object { "- $_" }) -join "`n") -MaxLength 1000)
+            inline = $false
         })
     }
     $fields.Add(@{
         name = "Criterio"
-        value = "Score = relevancia forense. Nao e prova automatica de cheat."
-        inline = $true
+        value = "Score indica relevancia forense e precisa de revisao humana. Nao e prova automatica de cheat."
+        inline = $false
     })
 
-    foreach ($evidence in @($visibleEvidence | Select-Object -First $DiscordMaxItems)) {
+    $prioritizedEvidence = Get-DiverseDiscordEvidence -Evidence $visibleEvidence
+    if ($prioritizedEvidence.Count -eq 0) {
+        $fields.Add(@{
+            name = "Achados priorizados"
+            value = "Nenhum achado acima do limiar configurado. Revise os anexos para contexto completo."
+            inline = $false
+        })
+    }
+
+    $itemNumber = 1
+    foreach ($evidence in $prioritizedEvidence) {
         $translation = Get-EvidenceTranslation $evidence
         $subject = $translation.Subject
         if (-not $subject) { $subject = "N/A" }
 
         $timeText = if ($evidence.Time) { [datetime]$evidence.Time } else { "N/A" }
-        $reasonText = @($evidence.Reasons | Select-Object -First 4) -join "; "
-        $value = "Score: $($evidence.Confidence) ($($translation.Severity))`nQuando: $timeText`nAlvo: $subject`nLeitura: $($translation.Translation)`nAcao: $($translation.OperatorAction)"
+        $reasonText = @($evidence.Reasons | Select-Object -First 3) -join "; "
+        $priority = Get-DiscordEvidencePriority $evidence
+        $value = "**Score:** $($evidence.Confidence) | **Prioridade:** $priority | **Severidade:** $($translation.Severity)`n**Quando:** $timeText`n**Alvo:** $(Limit-Text -Text $subject -MaxLength 220)`n**Leitura:** $($translation.Translation)`n**Acao:** $($translation.OperatorAction)"
         if ($reasonText) {
-            $value += "`nMotivos: $reasonText"
+            $value += "`n**Motivos:** $reasonText"
         }
 
         $fields.Add(@{
-            name = (Limit-Text -Text "$($evidence.Category) / $($evidence.Source)" -MaxLength 250)
+            name = (Limit-Text -Text "$itemNumber. $($evidence.Category) / $($evidence.Source)" -MaxLength 250)
             value = (Limit-Text -Text $value -MaxLength 1000)
             inline = $false
         })
+        $itemNumber++
     }
 
     $description = [string]$DiscordSubtitle
@@ -2033,6 +2334,11 @@ function Write-Outputs {
     Set-Content -LiteralPath $script:TimelinePath -Value $timelineLines -Encoding UTF8
     Write-RunLog "Local report written: $script:ReportPath"
     Write-RunLog "Local timeline written: $script:TimelinePath"
+
+    Add-DiscordAttachment -FileName $script:ReportFileName -Lines $script:Report -ContentType "text/plain; charset=utf-8"
+    Add-DiscordAttachment -FileName $script:TimelineFileName -Lines $timelineLines -ContentType "text/plain; charset=utf-8"
+    $script:DiscordAttachmentCount = $script:DiscordAttachments.Count
+    Write-RunLog "Local report and timeline added to Discord attachments."
     Write-RunLogFile
 
     Publish-DiscordArtifacts

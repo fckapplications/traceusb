@@ -64,13 +64,16 @@ When Discord reporting is used, TraceUSB builds these sensitive artifacts as
 Discord download attachments instead of saving them locally by default:
 
 ```text
+analise_yyyyMMdd_HHmmss.txt
+timeline_yyyyMMdd_HHmmss.txt
 evidence_yyyyMMdd_HHmmss.jsonl
 translations_yyyyMMdd_HHmmss.txt
 filtered_history_yyyyMMdd_HHmmss.txt
 ```
 
-Use `-SaveDiscordAttachmentsLocal` only when you explicitly want those attachment
-files written to the local output folder.
+`analise_*.txt` and `timeline_*.txt` are always written locally and are also
+attached to Discord. Use `-SaveDiscordAttachmentsLocal` only when you explicitly
+want the sensitive attachment-only files written to the local output folder.
 
 Each structured evidence item includes:
 
@@ -110,9 +113,9 @@ By default this internal build:
 * writes timestamped `analise_*.txt` and `timeline_*.txt` locally;
 * writes `traceusb_run_*.log` locally so network or webhook failures are visible;
 * sends a Discord embed when a webhook is configured;
-* attaches `evidence_*.jsonl` and `translations_*.txt`;
+* attaches `analise_*.txt`, `timeline_*.txt`, `evidence_*.jsonl`, and `translations_*.txt`;
 * runs the filtered browser-history scan and attaches `filtered_history_*.txt`;
-* does not open Notepad.
+* opens the local TXT files unless `-NoOpen` is used.
 
 Test only the Discord webhook path, including a small non-forensic attachment:
 
@@ -238,7 +241,7 @@ Customize game/session anchors:
 |---|---:|---|
 | `-LookbackHours` | `24` | Event and artifact lookback window |
 | `-OutputDirectory` | Desktop | Output folder |
-| `-NoOpen` | On | Prevents Notepad from opening outputs |
+| `-NoOpen` | Off | Prevents Notepad from opening outputs |
 | `-EnableAuditPolicy` | Off | Enables Process Creation auditing when running as admin |
 | `-EnableScreenshotTrigger` | Off | Sends native GPU screenshot hotkeys when runtime context exists |
 | `-IncludeLowConfidence` | Off | Includes low/context evidence in the readable report |
@@ -283,9 +286,17 @@ or the configured environment variable. Use `-DisableDiscordWebhook` for dry
 runs.
 
 The Discord embed summarizes findings and includes operator-friendly suggested
-translations. `evidence_*.jsonl`, `translations_*.txt`, and optional
-`filtered_history_*.txt` are sent as Discord download attachments below the
-embed. They are not saved locally unless `-SaveDiscordAttachmentsLocal` is used.
+translations. The embed prioritizes review-worthy categories such as Defender,
+anti-forensic events, browser-history keyword hits, service/driver installs,
+USB/removable context, and 4688-backed execution instead of simply listing the
+highest raw scores. Common browser/system executables seen only through
+Prefetch/BAM are de-prioritized in the embed but remain available in
+`evidence_*.jsonl`.
+
+`analise_*.txt`, `timeline_*.txt`, `evidence_*.jsonl`, `translations_*.txt`,
+and optional `filtered_history_*.txt` are sent as Discord download attachments
+below the embed. Sensitive attachment-only files are not saved locally unless
+`-SaveDiscordAttachmentsLocal` is used.
 TraceUSB writes local `analise_*.txt`, `timeline_*.txt`, and
 `traceusb_run_*.log` before attempting Discord delivery, so a webhook outage
 does not prevent local report generation.
@@ -325,6 +336,12 @@ meant for consent-based reviews and only exports entries matching configured
 keywords. It does not dump full browser history. Use
 `-DisableBrowserHistoryScan` for dry runs or when the review does not include
 browser checks.
+
+TraceUSB checks the current Windows profile and other accessible profiles under
+`C:\Users`, then copies browser databases to a temporary folder before querying
+them. The output lists detected Chrome/Edge/Brave/Opera/Firefox databases and
+records whether each database was readable. If no keyword matches are found, the
+file says so explicitly instead of implying that the browser was unsupported.
 
 Supported targets:
 
