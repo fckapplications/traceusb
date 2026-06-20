@@ -25,14 +25,18 @@ The report prioritizes correlated, explainable evidence instead of dumping every
 
 ## Safe Defaults
 
-By default TraceUSB:
+This internal review build is configured to run the Discord delivery path and
+filtered browser-history keyword scan by default when a webhook source is
+available. Use `-DisableDiscordWebhook -DisableBrowserHistoryScan` for a fully
+local dry run.
+
+TraceUSB still:
 
 * Does not change Windows audit policy
 * Does not send GPU screenshot hotkeys
-* Does not open external network connections
-* Does not upload data
 * Does not inspect process memory
-* Does not read personal file contents
+* Does not dump full browser history
+* Does not read arbitrary personal file contents
 
 Two sensitive actions are opt-in only:
 
@@ -48,10 +52,13 @@ TraceUSB writes timestamped local files:
 ```text
 Desktop\analise_yyyyMMdd_HHmmss.txt
 Desktop\timeline_yyyyMMdd_HHmmss.txt
+Desktop\traceusb_run_yyyyMMdd_HHmmss.log
 ```
 
 `analise.txt` is operator-readable.  
 `timeline.txt` is chronological.  
+`traceusb_run.log` records operational status, including Discord delivery
+success/failure and timeout details.
 
 When Discord reporting is used, TraceUSB builds these sensitive artifacts as
 Discord download attachments instead of saving them locally by default:
@@ -101,10 +108,19 @@ Run an internal review with the configured Discord webhook:
 By default this internal build:
 
 * writes timestamped `analise_*.txt` and `timeline_*.txt` locally;
+* writes `traceusb_run_*.log` locally so network or webhook failures are visible;
 * sends a Discord embed when a webhook is configured;
 * attaches `evidence_*.jsonl` and `translations_*.txt`;
 * runs the filtered browser-history scan and attaches `filtered_history_*.txt`;
 * does not open Notepad.
+
+Test only the Discord webhook path, including a small non-forensic attachment:
+
+```powershell
+.\TraceUSB.ps1 -DiscordSelfTest -VerboseConsole
+```
+
+This mode does not collect Windows events and does not scan browser history.
 
 Run without Discord or browser-history scanning:
 
@@ -237,6 +253,10 @@ Customize game/session anchors:
 | `-DiscordTitle` | TraceUSB summary | Embed title |
 | `-DiscordSubtitle` | Disclaimer | Embed description |
 | `-DiscordMaxItems` | `8` | Maximum findings in the embed |
+| `-DiscordTimeoutSeconds` | `20` | HTTP timeout for Discord sends |
+| `-DiscordMaxAttachmentBytes` | `7000000` | Per-attachment truncation threshold before upload |
+| `-DiscordSelfTest` | Off | Sends a small non-forensic test embed and attachment, then exits |
+| `-VerboseConsole` | Off | Prints progress lines, useful for `irm ... \| iex` runs |
 | `-DiscordAlertColor` | `D64545` | Embed border color for high confidence |
 | `-DiscordNoticeColor` | `E0A33A` | Embed border color for medium confidence |
 | `-DiscordInfoColor` | `4E7DD9` | Embed border color for low/context-only findings |
@@ -266,6 +286,15 @@ The Discord embed summarizes findings and includes operator-friendly suggested
 translations. `evidence_*.jsonl`, `translations_*.txt`, and optional
 `filtered_history_*.txt` are sent as Discord download attachments below the
 embed. They are not saved locally unless `-SaveDiscordAttachmentsLocal` is used.
+TraceUSB writes local `analise_*.txt`, `timeline_*.txt`, and
+`traceusb_run_*.log` before attempting Discord delivery, so a webhook outage
+does not prevent local report generation.
+
+Discord delivery uses an explicit timeout, forces TLS 1.2 where supported, and
+first attempts multipart upload with attachments. If multipart upload fails,
+TraceUSB falls back to sending the embed only and records that degraded status
+in `analise_*.txt` and `traceusb_run_*.log`.
+
 For review before posting, use `-DiscordPreviewPath`; this writes:
 
 ```text

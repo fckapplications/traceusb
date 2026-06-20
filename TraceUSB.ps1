@@ -36,6 +36,16 @@ param(
     [ValidateRange(1, 20)]
     [int]$DiscordMaxItems = 8,
 
+    [ValidateRange(5, 120)]
+    [int]$DiscordTimeoutSeconds = 20,
+
+    [ValidateRange(1024, 25000000)]
+    [int]$DiscordMaxAttachmentBytes = 7000000,
+
+    [switch]$DiscordSelfTest,
+
+    [switch]$VerboseConsole,
+
     [string]$DiscordAlertColor = "D64545",
 
     [string]$DiscordNoticeColor = "E0A33A",
@@ -115,17 +125,22 @@ $script:TimelineFileName = "timeline_$($script:ArtifactSuffix).txt"
 $script:EvidenceFileName = "evidence_$($script:ArtifactSuffix).jsonl"
 $script:TranslationsFileName = "translations_$($script:ArtifactSuffix).txt"
 $script:FilteredHistoryFileName = "filtered_history_$($script:ArtifactSuffix).txt"
+$script:RunLogFileName = "traceusb_run_$($script:ArtifactSuffix).log"
 $script:ReportPath = Join-Path $script:OutputDirectory $script:ReportFileName
 $script:TimelinePath = Join-Path $script:OutputDirectory $script:TimelineFileName
 $script:EvidencePath = Join-Path $script:OutputDirectory $script:EvidenceFileName
 $script:TranslationsPath = Join-Path $script:OutputDirectory $script:TranslationsFileName
 $script:FilteredHistoryPath = Join-Path $script:OutputDirectory $script:FilteredHistoryFileName
+$script:RunLogPath = Join-Path $script:OutputDirectory $script:RunLogFileName
 
 $script:Report = New-Object System.Collections.Generic.List[string]
 $script:Timeline = New-Object System.Collections.Generic.List[object]
 $script:Evidence = New-Object System.Collections.Generic.List[object]
 $script:FilteredHistoryHits = New-Object System.Collections.Generic.List[object]
 $script:DiscordAttachments = New-Object System.Collections.Generic.List[object]
+$script:RunLog = New-Object System.Collections.Generic.List[string]
+$script:DiscordStatus = if ($EnableDiscordWebhook) { "not_attempted" } else { "disabled" }
+$script:DiscordAttachmentCount = 0
 $script:Correlation = @{}
 $script:GameSessionTimes = New-Object System.Collections.Generic.List[datetime]
 $script:UsbTimes = New-Object System.Collections.Generic.List[datetime]
@@ -162,6 +177,49 @@ $script:OverlayProcessPatterns = @{
     "Discord"      = "discord"
     "Overwolf"     = "overwolf"
     "ReShade"      = "reshade"
+}
+
+function Ensure-OutputDirectory {
+    if (-not (Test-Path -LiteralPath $script:OutputDirectory)) {
+        New-Item -ItemType Directory -Path $script:OutputDirectory -Force | Out-Null
+    }
+}
+
+function Write-RunLog {
+    param([string]$Message)
+
+    if (-not $Message) { return }
+
+    $line = "{0:u} {1}" -f (Get-Date), $Message
+    $script:RunLog.Add($line)
+
+    if ($VerboseConsole) {
+        Write-Host "[TraceUSB] $Message"
+    }
+}
+
+function Write-RunLogFile {
+    Ensure-OutputDirectory
+    Set-Content -LiteralPath $script:RunLogPath -Value $script:RunLog -Encoding UTF8
+}
+
+function Write-ConsoleSummary {
+    Write-Host ""
+    Write-Host "TraceUSB concluido."
+    if ([System.IO.File]::Exists($script:ReportPath)) {
+        Write-Host "Analise: $script:ReportPath"
+    }
+    else {
+        Write-Host "Analise: nao gerada neste modo"
+    }
+    if ([System.IO.File]::Exists($script:TimelinePath)) {
+        Write-Host "Timeline: $script:TimelinePath"
+    }
+    else {
+        Write-Host "Timeline: nao gerada neste modo"
+    }
+    Write-Host "Run log: $script:RunLogPath"
+    Write-Host "Discord: $script:DiscordStatus"
 }
 
 function Write-Section {
@@ -1248,6 +1306,14 @@ function Add-DiscordAttachment {
     }
 
     $content = ($Lines -join "`r`n")
+    $bytes = [Text.Encoding]::UTF8.GetBytes($content)
+    if ($bytes.Length -gt $DiscordMaxAttachmentBytes) {
+        $keepBytes = [Math]::Max(1024, $DiscordMaxAttachmentBytes - 2048)
+        $content = [Text.Encoding]::UTF8.GetString($bytes, 0, $keepBytes)
+        $content += "`r`n`r`n[TraceUSB truncated this attachment from $($bytes.Length) bytes to fit DiscordMaxAttachmentBytes=$DiscordMaxAttachmentBytes.]"
+        Write-RunLog "Attachment truncated: $FileName ($($bytes.Length) bytes)."
+    }
+
     $script:DiscordAttachments.Add([PSCustomObject]@{
         FileName    = $FileName
         Content     = $content
@@ -1255,7 +1321,7 @@ function Add-DiscordAttachment {
     })
 
     if ($SaveDiscordAttachmentsLocal -and $LocalPath) {
-        Set-Content -LiteralPath $LocalPath -Value $Lines -Encoding UTF8
+        Set-Content -LiteralPath $LocalPath -Value $content -Encoding UTF8
     }
 }
 
@@ -1780,28 +1846,80 @@ function Get-DiscordWebhookUrl {
 function Send-DiscordWebhook {
     param($Payload)
 
-    if (-not $EnableDiscordWebhook) { return }
+    if (-not $EnableDiscordWebhook) {
+        $script:DiscordStatus = "disabled"
+        Write-RunLog "Discord webhook disabled."
+        return
+    }
 
     $resolvedWebhookUrl = Get-DiscordWebhookUrl
 
     if (-not $resolvedWebhookUrl) {
+        $script:DiscordStatus = "skipped_no_webhook"
         $script:Report.Add("")
         $script:Report.Add("Discord webhook skipped: no URL, DPAPI secret, or environment variable was available.")
+        Write-RunLog "Discord webhook skipped: no webhook URL was available."
         return
     }
 
     try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    }
+    catch {
+        Write-RunLog "Could not force TLS 1.2: $($_.Exception.Message)"
+    }
+
+    $payloadJson = $Payload | ConvertTo-Json -Depth 10
+    $attachmentCount = $script:DiscordAttachments.Count
+    $script:DiscordAttachmentCount = $attachmentCount
+    Write-RunLog "Discord send starting with $attachmentCount attachment(s), timeout $DiscordTimeoutSeconds second(s)."
+
+    if ($attachmentCount -eq 0) {
+        $jsonClient = $null
+        $jsonContent = $null
+        try {
+            Add-Type -AssemblyName System.Net.Http
+            $jsonClient = New-Object System.Net.Http.HttpClient
+            $jsonClient.Timeout = [TimeSpan]::FromSeconds($DiscordTimeoutSeconds)
+            $jsonContent = New-Object System.Net.Http.StringContent($payloadJson, [Text.Encoding]::UTF8, "application/json")
+            $jsonResponse = $jsonClient.PostAsync($resolvedWebhookUrl, $jsonContent).GetAwaiter().GetResult()
+            if (-not $jsonResponse.IsSuccessStatusCode) {
+                $responseText = $jsonResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                throw "Discord returned HTTP $([int]$jsonResponse.StatusCode): $responseText"
+            }
+
+            $script:DiscordStatus = "sent_embed_only"
+            $script:Report.Add("")
+            $script:Report.Add("Discord webhook sent without attachments.")
+            Write-RunLog "Discord webhook sent without attachments."
+            return
+        }
+        catch {
+            $script:DiscordStatus = "failed"
+            $script:Report.Add("")
+            $script:Report.Add("Discord webhook failed: $($_.Exception.Message)")
+            Write-RunLog "Discord webhook failed: $($_.Exception.Message)"
+            return
+        }
+        finally {
+            if ($jsonContent) { $jsonContent.Dispose() }
+            if ($jsonClient) { $jsonClient.Dispose() }
+        }
+    }
+
+    $multipartError = $null
+    try {
         Add-Type -AssemblyName System.Net.Http
 
         $client = New-Object System.Net.Http.HttpClient
+        $client.Timeout = [TimeSpan]::FromSeconds($DiscordTimeoutSeconds)
         $multipart = New-Object System.Net.Http.MultipartFormDataContent
 
-        $payloadJson = $Payload | ConvertTo-Json -Depth 10
         $payloadContent = New-Object System.Net.Http.StringContent($payloadJson, [Text.Encoding]::UTF8, "application/json")
         $multipart.Add($payloadContent, "payload_json")
 
         $index = 0
-        foreach ($attachment in @($script:DiscordAttachments)) {
+        foreach ($attachment in $script:DiscordAttachments) {
             if (-not $attachment -or -not $attachment.FileName) { continue }
 
             $bytes = [Text.Encoding]::UTF8.GetBytes([string]$attachment.Content)
@@ -1819,25 +1937,60 @@ function Send-DiscordWebhook {
             throw "Discord returned HTTP $([int]$response.StatusCode): $responseText"
         }
 
+        $script:DiscordStatus = "sent_with_attachments"
         $script:Report.Add("")
         $script:Report.Add("Discord webhook sent with $index attachment(s).")
+        Write-RunLog "Discord webhook sent with $index attachment(s)."
+        return
     }
     catch {
+        $multipartError = $_.Exception.Message
         $script:Report.Add("")
-        $script:Report.Add("Discord webhook failed: $($_.Exception.Message)")
+        $script:Report.Add("Discord webhook multipart failed: $multipartError")
+        Write-RunLog "Discord multipart send failed: $multipartError"
     }
     finally {
         if ($multipart) { $multipart.Dispose() }
         if ($client) { $client.Dispose() }
     }
+
+    $fallbackClient = $null
+    $fallbackContent = $null
+    try {
+        Add-Type -AssemblyName System.Net.Http
+        $fallbackClient = New-Object System.Net.Http.HttpClient
+        $fallbackClient.Timeout = [TimeSpan]::FromSeconds($DiscordTimeoutSeconds)
+        $fallbackContent = New-Object System.Net.Http.StringContent($payloadJson, [Text.Encoding]::UTF8, "application/json")
+        $fallbackResponse = $fallbackClient.PostAsync($resolvedWebhookUrl, $fallbackContent).GetAwaiter().GetResult()
+        if (-not $fallbackResponse.IsSuccessStatusCode) {
+            $fallbackText = $fallbackResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            throw "Discord returned HTTP $([int]$fallbackResponse.StatusCode): $fallbackText"
+        }
+
+        $script:DiscordStatus = "sent_embed_only_after_attachment_failure"
+        $script:Report.Add("Discord webhook fallback sent embed only; attachments were not delivered.")
+        Write-RunLog "Discord fallback sent embed only after attachment failure."
+    }
+    catch {
+        $script:DiscordStatus = "failed"
+        $script:Report.Add("Discord webhook fallback failed: $($_.Exception.Message)")
+        Write-RunLog "Discord fallback failed: $($_.Exception.Message)"
+    }
+    finally {
+        if ($fallbackContent) { $fallbackContent.Dispose() }
+        if ($fallbackClient) { $fallbackClient.Dispose() }
+    }
 }
 
-function Publish-DiscordArtifacts {
+function Build-DiscordArtifacts {
     $script:DiscordAttachments.Clear()
+    Write-RunLog "Building Discord artifacts."
 
     $historyLines = $null
     if ($EnableBrowserHistoryScan) {
+        Write-RunLog "Filtered browser-history scan starting."
         $historyLines = Get-FilteredHistoryLines
+        Write-RunLog "Filtered browser-history scan finished with $($script:FilteredHistoryHits.Count) hit(s)."
     }
 
     $evidenceLines = Get-EvidenceJsonLines
@@ -1849,7 +2002,11 @@ function Publish-DiscordArtifacts {
     if ($EnableBrowserHistoryScan) {
         Add-DiscordAttachment -FileName $script:FilteredHistoryFileName -Lines $historyLines -ContentType "text/plain; charset=utf-8" -LocalPath $script:FilteredHistoryPath
     }
+    $script:DiscordAttachmentCount = $script:DiscordAttachments.Count
+    Write-RunLog "Discord artifacts built: $($script:DiscordAttachments.Count) attachment(s)."
+}
 
+function Publish-DiscordArtifacts {
     if (-not $DiscordPreviewPath -and -not $EnableDiscordWebhook) { return }
 
     $payload = Build-DiscordEmbedPayload
@@ -1858,11 +2015,9 @@ function Publish-DiscordArtifacts {
 }
 
 function Write-Outputs {
-    if (-not (Test-Path -LiteralPath $script:OutputDirectory)) {
-        New-Item -ItemType Directory -Path $script:OutputDirectory -Force | Out-Null
-    }
-
-    Publish-DiscordArtifacts
+    Ensure-OutputDirectory
+    Write-RunLog "Writing outputs to $script:OutputDirectory."
+    Build-DiscordArtifacts
     Write-Summary
 
     [System.IO.File]::WriteAllLines($script:ReportPath, $script:Report, [System.Text.Encoding]::UTF8)
@@ -1876,7 +2031,21 @@ function Write-Outputs {
             }
     )
     Set-Content -LiteralPath $script:TimelinePath -Value $timelineLines -Encoding UTF8
+    Write-RunLog "Local report written: $script:ReportPath"
+    Write-RunLog "Local timeline written: $script:TimelinePath"
+    Write-RunLogFile
 
+    Publish-DiscordArtifacts
+
+    $script:Report.Add("")
+    $script:Report.Add("==== Delivery ====")
+    $script:Report.Add("")
+    $script:Report.Add("Discord status: $script:DiscordStatus")
+    $script:Report.Add("Discord attachments prepared: $script:DiscordAttachmentCount")
+    $script:Report.Add("Run log: $script:RunLogPath")
+    [System.IO.File]::WriteAllLines($script:ReportPath, $script:Report, [System.Text.Encoding]::UTF8)
+    Write-RunLog "Final Discord status: $script:DiscordStatus"
+    Write-RunLogFile
 }
 
 function Enable-ProcessAuditPolicy {
@@ -1902,8 +2071,71 @@ function Enable-ProcessAuditPolicy {
     }
 }
 
+function Invoke-DiscordSelfTest {
+    Ensure-OutputDirectory
+    Write-RunLog "Discord self-test started."
+    $script:DiscordAttachments.Clear()
+    Add-DiscordAttachment `
+        -FileName "discord_selftest_$($script:ArtifactSuffix).txt" `
+        -Lines @(
+            "TraceUSB Discord self-test",
+            "Generated: $(Get-Date)",
+            "Purpose: validates Discord multipart upload without collecting forensic data."
+        ) `
+        -ContentType "text/plain; charset=utf-8"
+
+    $payload = @{
+        username = $DiscordUsername
+        embeds = @(
+            @{
+                title = "TraceUSB webhook self-test"
+                description = "Teste de conectividade do webhook com anexo multipart. Nenhuma coleta forense foi executada."
+                color = [int](Convert-HexColorToInt -Hex $DiscordInfoColor -Fallback "4E7DD9")
+                fields = @(
+                    @{
+                        name = "Origem"
+                        value = "Execucao local do TraceUSB em modo DiscordSelfTest."
+                        inline = $false
+                    },
+                    @{
+                        name = "Janela"
+                        value = "Timeout configurado: $DiscordTimeoutSeconds segundo(s)."
+                        inline = $false
+                    },
+                    @{
+                        name = "Anexo"
+                        value = "Inclui um arquivo de autoteste sem dados forenses para validar upload multipart."
+                        inline = $false
+                    }
+                )
+                footer = @{
+                    text = "TraceUSB local forensic analyzer"
+                }
+                timestamp = (Get-Date).ToUniversalTime().ToString("o")
+            }
+        )
+    }
+
+    Write-DiscordPreview -Payload $payload
+    Send-DiscordWebhook -Payload $payload
+    Write-RunLog "Discord self-test finished with status $script:DiscordStatus."
+    Write-RunLogFile
+    Write-ConsoleSummary
+}
+
+Write-RunLog "TraceUSB started. LookbackHours=$LookbackHours OutputDirectory=$script:OutputDirectory."
+
 if ($SaveDiscordWebhookSecret) {
+    Ensure-OutputDirectory
+    Write-RunLog "Saving Discord webhook secret with DPAPI."
     Save-DiscordWebhookSecret
+    Write-RunLog "Discord webhook secret save flow finished."
+    Write-RunLogFile
+    return
+}
+
+if ($DiscordSelfTest) {
+    Invoke-DiscordSelfTest
     return
 }
 
@@ -1924,3 +2156,5 @@ if (-not $NoOpen) {
     Start-Process notepad.exe $script:ReportPath
     Start-Process notepad.exe $script:TimelinePath
 }
+
+Write-ConsoleSummary
