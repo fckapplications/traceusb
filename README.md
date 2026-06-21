@@ -53,12 +53,21 @@ TraceUSB writes timestamped local files:
 Desktop\analise_yyyyMMdd_HHmmss.txt
 Desktop\timeline_yyyyMMdd_HHmmss.txt
 Desktop\traceusb_run_yyyyMMdd_HHmmss.log
+Desktop\network_snapshot_yyyyMMdd_HHmmss.txt
+Desktop\system_context_yyyyMMdd_HHmmss.txt
+Desktop\integrity_hashes_yyyyMMdd_HHmmss.txt
+Desktop\TraceUSB_case_yyyyMMdd_HHmmss.zip
 ```
 
 `analise.txt` is operator-readable.  
 `timeline.txt` is chronological.  
 `traceusb_run.log` records operational status, including Discord delivery
 success/failure and timeout details.
+`network_snapshot.txt` records network metadata for fake-lag/VPN/proxy review.
+`system_context.txt` records host context such as OS, boot time, timezone, and
+administrator state.
+`integrity_hashes.txt` records SHA256 hashes for the case bundle contents.
+`TraceUSB_case_*.zip` packages the run artifacts for review.
 
 When Discord reporting is used, TraceUSB builds these sensitive artifacts as
 Discord download attachments instead of saving them locally by default:
@@ -69,11 +78,18 @@ timeline_yyyyMMdd_HHmmss.txt
 evidence_yyyyMMdd_HHmmss.jsonl
 translations_yyyyMMdd_HHmmss.txt
 filtered_history_yyyyMMdd_HHmmss.txt
+network_snapshot_yyyyMMdd_HHmmss.txt
+system_context_yyyyMMdd_HHmmss.txt
+traceusb_run_yyyyMMdd_HHmmss.log
+integrity_hashes_yyyyMMdd_HHmmss.txt
+TraceUSB_case_yyyyMMdd_HHmmss.zip
 ```
 
-`analise_*.txt` and `timeline_*.txt` are always written locally and are also
-attached to Discord. Use `-SaveDiscordAttachmentsLocal` only when you explicitly
-want the sensitive attachment-only files written to the local output folder.
+`analise_*.txt`, `timeline_*.txt`, `network_snapshot_*.txt`,
+`system_context_*.txt`, `traceusb_run_*.log`, `integrity_hashes_*.txt`, and the
+case ZIP are written locally and are also attached to Discord when available.
+Use `-SaveDiscordAttachmentsLocal` only when you explicitly want the
+sensitive attachment-only files written to the local output folder.
 
 Each structured evidence item includes:
 
@@ -112,6 +128,7 @@ By default this internal build:
 
 * writes timestamped `analise_*.txt` and `timeline_*.txt` locally;
 * writes `traceusb_run_*.log` locally so network or webhook failures are visible;
+* writes `network_snapshot_*.txt`, `system_context_*.txt`, and a hashed case ZIP;
 * sends a Discord embed when a webhook is configured;
 * attaches `analise_*.txt`, `timeline_*.txt`, `evidence_*.jsonl`, and `translations_*.txt`;
 * runs the filtered browser-history scan and attaches `filtered_history_*.txt`;
@@ -125,10 +142,10 @@ Test only the Discord webhook path, including a small non-forensic attachment:
 
 This mode does not collect Windows events and does not scan browser history.
 
-Run without Discord or browser-history scanning:
+Run without Discord, browser-history scanning, network scan, or case bundle:
 
 ```powershell
-.\TraceUSB.ps1 -DisableDiscordWebhook -DisableBrowserHistoryScan
+.\TraceUSB.ps1 -DisableDiscordWebhook -DisableBrowserHistoryScan -DisableNetworkAnomalyScan -DisableCaseBundle
 ```
 
 Write output to a custom folder:
@@ -271,6 +288,10 @@ Customize game/session anchors:
 | `-BrowserHistoryKeywords` | SCUM cheat/fake-lag terms | Keyword list for filtered history |
 | `-BrowserHistoryLookbackDays` | `30` | Browser history lookback window |
 | `-BrowserHistoryMaxHits` | `100` | Maximum filtered history hits |
+| `-EnableNetworkAnomalyScan` | On | Collects network metadata and indicators relevant to fake-lag review |
+| `-DisableNetworkAnomalyScan` | Off | Disables network metadata collection |
+| `-EnableCaseBundle` | On | Creates a timestamped ZIP with run artifacts and SHA256 hashes |
+| `-DisableCaseBundle` | Off | Disables local case bundle ZIP creation |
 | `-SQLiteCliPath` | Auto-detect | Optional path to `sqlite3.exe` |
 | `-NoRedactUrls` | Off | Keeps full matched URLs instead of redacting query strings |
 | `-GameProcessPatterns` | SCUM/BattlEye defaults | Process names used as temporal anchors |
@@ -326,6 +347,44 @@ profile on the same machine.
 If you need to distribute TraceUSB to players without exposing the Discord
 webhook, use a small server-side relay endpoint instead of embedding the real
 Discord URL in the script.
+
+---
+
+## Network Anomaly Review
+
+Network anomaly scanning is metadata-only. TraceUSB does not capture packet
+contents and does not inspect live game traffic. It records:
+
+* active network adapters and IP configuration;
+* Windows proxy and WinHTTP proxy settings;
+* active TCP connection sample with owning process names;
+* DNS cache indicators for known cheat/network tooling terms;
+* network profile connect/disconnect events near the SCUM/BattlEye window;
+* active processes, services, drivers, and adapters matching VPN/tunnel,
+  packet-diversion, packet-capture, proxy, route-optimizer, or bandwidth-shaping
+  tools.
+
+Examples of indicators include WinDivert, clumsy, NetLimiter, Proxifier, Npcap,
+TAP/Wintun/WireGuard/OpenVPN, ExitLag, Mudfish, WTFast, NoPing, Haste, and
+similar VPN/proxy tooling. These are review indicators only: VPNs, packet
+capture tools, and route optimizers can be legitimate.
+
+---
+
+## Case Bundle
+
+When enabled, TraceUSB creates:
+
+```text
+TraceUSB_case_yyyyMMdd_HHmmss.zip
+integrity_hashes_yyyyMMdd_HHmmss.txt
+```
+
+The ZIP contains the run artifacts generated by TraceUSB, including analysis,
+timeline, evidence JSONL, translations, optional filtered history, network
+snapshot, system context, and run log. `integrity_hashes_*.txt` records SHA256
+hashes for the files inside the case bundle so reviewers can detect accidental
+or intentional changes after collection.
 
 ---
 

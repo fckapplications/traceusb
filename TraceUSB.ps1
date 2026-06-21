@@ -97,6 +97,14 @@ param(
     [ValidateRange(1, 500)]
     [int]$BrowserHistoryMaxHits = 100,
 
+    [switch]$EnableNetworkAnomalyScan = $true,
+
+    [switch]$DisableNetworkAnomalyScan,
+
+    [switch]$EnableCaseBundle = $true,
+
+    [switch]$DisableCaseBundle,
+
     [string]$SQLiteCliPath,
 
     [switch]$NoRedactUrls,
@@ -120,6 +128,14 @@ if ($DisableBrowserHistoryScan) {
     $EnableBrowserHistoryScan = $false
 }
 
+if ($DisableNetworkAnomalyScan) {
+    $EnableNetworkAnomalyScan = $false
+}
+
+if ($DisableCaseBundle) {
+    $EnableCaseBundle = $false
+}
+
 $script:StartTime = (Get-Date).AddHours(-1 * $LookbackHours)
 $script:OutputDirectory = $OutputDirectory
 $script:RunStamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -137,18 +153,28 @@ $script:TimelineFileName = "timeline_$($script:ArtifactSuffix).txt"
 $script:EvidenceFileName = "evidence_$($script:ArtifactSuffix).jsonl"
 $script:TranslationsFileName = "translations_$($script:ArtifactSuffix).txt"
 $script:FilteredHistoryFileName = "filtered_history_$($script:ArtifactSuffix).txt"
+$script:NetworkSnapshotFileName = "network_snapshot_$($script:ArtifactSuffix).txt"
+$script:SystemContextFileName = "system_context_$($script:ArtifactSuffix).txt"
+$script:IntegrityHashesFileName = "integrity_hashes_$($script:ArtifactSuffix).txt"
+$script:CaseBundleFileName = "TraceUSB_case_$($script:ArtifactSuffix).zip"
 $script:RunLogFileName = "traceusb_run_$($script:ArtifactSuffix).log"
 $script:ReportPath = Join-Path $script:OutputDirectory $script:ReportFileName
 $script:TimelinePath = Join-Path $script:OutputDirectory $script:TimelineFileName
 $script:EvidencePath = Join-Path $script:OutputDirectory $script:EvidenceFileName
 $script:TranslationsPath = Join-Path $script:OutputDirectory $script:TranslationsFileName
 $script:FilteredHistoryPath = Join-Path $script:OutputDirectory $script:FilteredHistoryFileName
+$script:NetworkSnapshotPath = Join-Path $script:OutputDirectory $script:NetworkSnapshotFileName
+$script:SystemContextPath = Join-Path $script:OutputDirectory $script:SystemContextFileName
+$script:IntegrityHashesPath = Join-Path $script:OutputDirectory $script:IntegrityHashesFileName
+$script:CaseBundlePath = Join-Path $script:OutputDirectory $script:CaseBundleFileName
 $script:RunLogPath = Join-Path $script:OutputDirectory $script:RunLogFileName
 
 $script:Report = New-Object System.Collections.Generic.List[string]
 $script:Timeline = New-Object System.Collections.Generic.List[object]
 $script:Evidence = New-Object System.Collections.Generic.List[object]
 $script:FilteredHistoryHits = New-Object System.Collections.Generic.List[object]
+$script:NetworkSnapshot = New-Object System.Collections.Generic.List[string]
+$script:SystemContext = New-Object System.Collections.Generic.List[string]
 $script:DiscordAttachments = New-Object System.Collections.Generic.List[object]
 $script:RunLog = New-Object System.Collections.Generic.List[string]
 $script:DiscordStatus = if ($EnableDiscordWebhook) { "not_attempted" } else { "disabled" }
@@ -232,6 +258,31 @@ function Write-ConsoleSummary {
     }
     Write-Host "Run log: $script:RunLogPath"
     Write-Host "Discord: $script:DiscordStatus"
+    if ([System.IO.File]::Exists($script:CaseBundlePath)) {
+        Write-Host "Case bundle: $script:CaseBundlePath"
+    }
+}
+
+function Add-Line {
+    param(
+        [System.Collections.Generic.List[string]]$List,
+        [string]$Line = ""
+    )
+
+    $List.Add($Line)
+}
+
+function Test-IsAdministrator {
+    try {
+        return (
+            New-Object Security.Principal.WindowsPrincipal(
+                [Security.Principal.WindowsIdentity]::GetCurrent()
+            )
+        ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch {
+        return $false
+    }
 }
 
 function Write-Section {
@@ -1027,6 +1078,336 @@ function Collect-RuntimeContext {
     }
 }
 
+function Get-NetworkRiskCatalog {
+    return @(
+        [PSCustomObject]@{ Name = "WinDivert"; Pattern = "windivert"; Kind = "packet diversion driver"; BaseScore = 70 },
+        [PSCustomObject]@{ Name = "clumsy"; Pattern = "(^|\\|/| )clumsy(\.exe)?$|clumsy"; Kind = "packet loss/latency tool"; BaseScore = 70 },
+        [PSCustomObject]@{ Name = "NetLimiter"; Pattern = "netlimiter|nlclient|nlsvc"; Kind = "bandwidth shaping tool"; BaseScore = 60 },
+        [PSCustomObject]@{ Name = "Proxifier"; Pattern = "proxifier|prxer"; Kind = "proxy routing tool"; BaseScore = 55 },
+        [PSCustomObject]@{ Name = "Npcap"; Pattern = "npcap|\\npf\.sys|(^| )npf($| )"; Kind = "packet capture driver"; BaseScore = 45 },
+        [PSCustomObject]@{ Name = "TAP"; Pattern = "tap-windows|tap0901|tapoas|tap adapter"; Kind = "VPN/TAP adapter"; BaseScore = 45 },
+        [PSCustomObject]@{ Name = "Wintun"; Pattern = "wintun|wireguard"; Kind = "VPN tunnel driver"; BaseScore = 45 },
+        [PSCustomObject]@{ Name = "Generic VPN/Tunnel"; Pattern = "vpn| tunnel |tun adapter|tun driver"; Kind = "VPN/tunnel component"; BaseScore = 35 },
+        [PSCustomObject]@{ Name = "OpenVPN"; Pattern = "openvpn"; Kind = "VPN client"; BaseScore = 45 },
+        [PSCustomObject]@{ Name = "WireGuard"; Pattern = "wireguard"; Kind = "VPN client"; BaseScore = 45 },
+        [PSCustomObject]@{ Name = "ExitLag"; Pattern = "exitlag"; Kind = "gaming route/VPN tool"; BaseScore = 45 },
+        [PSCustomObject]@{ Name = "Mudfish"; Pattern = "mudfish"; Kind = "gaming route/VPN tool"; BaseScore = 45 },
+        [PSCustomObject]@{ Name = "WTFast"; Pattern = "wtfast"; Kind = "gaming route/VPN tool"; BaseScore = 45 },
+        [PSCustomObject]@{ Name = "NoPing"; Pattern = "noping"; Kind = "gaming route/VPN tool"; BaseScore = 45 },
+        [PSCustomObject]@{ Name = "Haste"; Pattern = "haste"; Kind = "gaming route/VPN tool"; BaseScore = 40 },
+        [PSCustomObject]@{ Name = "ProtonVPN"; Pattern = "protonvpn|proton vpn"; Kind = "VPN client"; BaseScore = 40 },
+        [PSCustomObject]@{ Name = "NordVPN"; Pattern = "nordvpn|nord vpn"; Kind = "VPN client"; BaseScore = 40 },
+        [PSCustomObject]@{ Name = "Cloudflare WARP"; Pattern = "cloudflare warp|warp-svc|warp\.exe|warp service"; Kind = "VPN/tunnel client"; BaseScore = 35 },
+        [PSCustomObject]@{ Name = "Fiddler"; Pattern = "fiddler|telerik"; Kind = "HTTP proxy/debug tool"; BaseScore = 35 },
+        [PSCustomObject]@{ Name = "Charles Proxy"; Pattern = "charles"; Kind = "HTTP proxy/debug tool"; BaseScore = 35 },
+        [PSCustomObject]@{ Name = "mitmproxy"; Pattern = "mitmproxy"; Kind = "HTTP proxy/debug tool"; BaseScore = 35 }
+    )
+}
+
+function Get-NetworkRiskMatch {
+    param([string]$Text)
+
+    if (-not $Text) { return $null }
+    foreach ($item in Get-NetworkRiskCatalog) {
+        if ($Text -match $item.Pattern) { return $item }
+    }
+    return $null
+}
+
+function Test-BuiltInWindowsNetworkComponent {
+    param(
+        [string]$Name,
+        [string]$PathName
+    )
+
+    if ($Name -match '^(RasMan|RasAgileVpn|SstpSvc|EapHost|Ikeext|PolicyAgent|NlaSvc|Dnscache|WinHttpAutoProxySvc)$') {
+        return $true
+    }
+    if ($PathName -match '\\Windows\\System32\\(svchost\.exe|drivers\\AgileVpn\.sys)' -or $PathName -match '\\WINDOWS\\System32\\(svchost\.exe|drivers\\AgileVpn\.sys)') {
+        return $true
+    }
+    return $false
+}
+
+function Get-ProcessNameByIdSafe {
+    param([int]$ProcessId)
+
+    if ($ProcessId -le 0) { return "" }
+    try {
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
+        if ($process.ProcessName) { return "$($process.ProcessName).exe" }
+    }
+    catch {}
+    return ""
+}
+
+function Add-NetworkEvidence {
+    param(
+        [string]$Source,
+        [string]$Subject,
+        [string]$Details,
+        [int]$BaseScore,
+        [string[]]$Reasons,
+        [AllowNull()]$Time = (Get-Date)
+    )
+
+    $score = $BaseScore
+    $cleanReasons = @($Reasons)
+    if ($Time -and (Test-NearAnyTime -Time $Time -Times $script:GameSessionTimes -Minutes 45)) {
+        $score += 15
+        $cleanReasons += "Near SCUM/BattlEye session window"
+    }
+    $score = [Math]::Min(100, $score)
+
+    Add-Evidence -Time $Time -Category "NetworkAnomaly" -Source $Source -Confidence $score -Reasons $cleanReasons -Details "$Subject - $Details" | Out-Null
+}
+
+function Collect-SystemContext {
+    $script:SystemContext.Clear()
+    Add-Line $script:SystemContext "TraceUSB system context"
+    Add-Line $script:SystemContext "Generated: $(Get-Date)"
+    Add-Line $script:SystemContext "Computer: $env:COMPUTERNAME"
+    Add-Line $script:SystemContext "User: $env:USERNAME"
+    Add-Line $script:SystemContext "Administrator: $(Test-IsAdministrator)"
+    Add-Line $script:SystemContext "LookbackHours: $LookbackHours"
+    Add-Line $script:SystemContext "SubjectLabel: $SubjectLabel"
+
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+        if ($os) {
+            Add-Line $script:SystemContext "OS: $($os.Caption) $($os.Version) build $($os.BuildNumber)"
+            Add-Line $script:SystemContext "InstallDate: $($os.InstallDate)"
+            Add-Line $script:SystemContext "LastBootUpTime: $($os.LastBootUpTime)"
+        }
+    }
+    catch {}
+
+    try {
+        $tz = Get-TimeZone -ErrorAction SilentlyContinue
+        if ($tz) { Add-Line $script:SystemContext "TimeZone: $($tz.Id) / $($tz.DisplayName)" }
+    }
+    catch {}
+
+    Add-Line $script:SystemContext "PowerShell: $($PSVersionTable.PSVersion)"
+    Add-Line $script:SystemContext "ScriptRunStamp: $script:RunStamp"
+}
+
+function Collect-NetworkAnomalies {
+    if (-not $EnableNetworkAnomalyScan) {
+        Write-RunLog "Network anomaly scan disabled."
+        return
+    }
+
+    Write-Section "NETWORK ANOMALY CONTEXT"
+    $script:NetworkSnapshot.Clear()
+    Add-Line $script:NetworkSnapshot "TraceUSB network anomaly snapshot"
+    Add-Line $script:NetworkSnapshot "Generated: $(Get-Date)"
+    Add-Line $script:NetworkSnapshot "Privacy: metadata only. TraceUSB does not sniff packet contents."
+    Add-Line $script:NetworkSnapshot ""
+
+    $found = $false
+    $seenEvidence = @{}
+
+    function Add-UniqueNetworkEvidence {
+        param(
+            [string]$Key,
+            [string]$Source,
+            [string]$Subject,
+            [string]$Details,
+            [int]$BaseScore,
+            [string[]]$Reasons,
+            [AllowNull()]$Time = (Get-Date)
+        )
+
+        if ($seenEvidence.ContainsKey($Key)) { return }
+        $seenEvidence[$Key] = $true
+        Add-NetworkEvidence -Source $Source -Subject $Subject -Details $Details -BaseScore $BaseScore -Reasons $Reasons -Time $Time
+    }
+
+    Add-Line $script:NetworkSnapshot "== Adapters =="
+    try {
+        Get-NetAdapter -ErrorAction SilentlyContinue |
+            Sort-Object Status, Name |
+            ForEach-Object {
+                $line = "$($_.Name) | Status=$($_.Status) | Interface=$($_.InterfaceDescription) | Mac=$($_.MacAddress) | LinkSpeed=$($_.LinkSpeed)"
+                Add-Line $script:NetworkSnapshot $line
+                $match = Get-NetworkRiskMatch "$($_.Name) $($_.InterfaceDescription)"
+                if ($match) {
+                    $found = $true
+                    $script:Report.Add("Network adapter indicator: $line")
+                    Add-UniqueNetworkEvidence -Key "adapter:$($_.Name):$($match.Name)" -Source "NetworkAdapter" -Subject $match.Name -Details "$($match.Kind): $($_.Name)" -BaseScore $match.BaseScore -Reasons @("Network adapter matched $($match.Name)")
+                }
+            }
+    }
+    catch {
+        Add-Line $script:NetworkSnapshot "Adapter collection failed: $($_.Exception.Message)"
+    }
+    Add-Line $script:NetworkSnapshot ""
+
+    Add-Line $script:NetworkSnapshot "== IP Configuration =="
+    try {
+        Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                $ipv4 = @($_.IPv4Address | ForEach-Object { $_.IPAddress }) -join ", "
+                $dns = @($_.DNSServer.ServerAddresses) -join ", "
+                Add-Line $script:NetworkSnapshot "$($_.InterfaceAlias) | IPv4=$ipv4 | Gateway=$($_.IPv4DefaultGateway.NextHop) | DNS=$dns"
+            }
+    }
+    catch {
+        Add-Line $script:NetworkSnapshot "IP configuration collection failed: $($_.Exception.Message)"
+    }
+    Add-Line $script:NetworkSnapshot ""
+
+    Add-Line $script:NetworkSnapshot "== Proxy =="
+    try {
+        $proxy = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue
+        if ($proxy) {
+            Add-Line $script:NetworkSnapshot "HKCU ProxyEnable=$($proxy.ProxyEnable) ProxyServer=$($proxy.ProxyServer) AutoConfigURL=$($proxy.AutoConfigURL)"
+            if ($proxy.ProxyEnable -eq 1 -or $proxy.ProxyServer -or $proxy.AutoConfigURL) {
+                $found = $true
+                Add-UniqueNetworkEvidence -Key "proxy:hkcu" -Source "ProxyConfig" -Subject "Windows proxy" -Details "Proxy configuration enabled or present" -BaseScore 35 -Reasons @("Proxy configuration present")
+            }
+        }
+    }
+    catch {}
+    try {
+        $winHttp = netsh winhttp show proxy 2>$null
+        foreach ($line in @($winHttp)) { Add-Line $script:NetworkSnapshot $line }
+        if (($winHttp -join " ") -notmatch "Direct access|Direto") {
+            $found = $true
+            Add-UniqueNetworkEvidence -Key "proxy:winhttp" -Source "ProxyConfig" -Subject "WinHTTP proxy" -Details (($winHttp -join " ") -replace '\s+', ' ') -BaseScore 35 -Reasons @("WinHTTP proxy configuration present")
+        }
+    }
+    catch {}
+    Add-Line $script:NetworkSnapshot ""
+
+    Add-Line $script:NetworkSnapshot "== Active Risk Processes =="
+    try {
+        Get-Process -ErrorAction SilentlyContinue |
+            Sort-Object ProcessName |
+            ForEach-Object {
+                $path = ""
+                try { $path = $_.Path } catch {}
+                $text = "$($_.ProcessName) $path"
+                $match = Get-NetworkRiskMatch $text
+                if ($match) {
+                    $found = $true
+                    $line = "$($_.ProcessName).exe | PID=$($_.Id) | Path=$path | Indicator=$($match.Name)"
+                    Add-Line $script:NetworkSnapshot $line
+                    $script:Report.Add("Network process indicator: $line")
+                    Add-UniqueNetworkEvidence -Key "process:$($_.Id):$($match.Name)" -Source "Process" -Subject "$($_.ProcessName).exe" -Details "$($match.Kind): $path" -BaseScore $match.BaseScore -Reasons @("Active process matched $($match.Name)")
+                }
+            }
+    }
+    catch {
+        Add-Line $script:NetworkSnapshot "Process network-risk collection failed: $($_.Exception.Message)"
+    }
+    Add-Line $script:NetworkSnapshot ""
+
+    Add-Line $script:NetworkSnapshot "== Network Services and Drivers =="
+    try {
+        Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue |
+            Where-Object {
+                $match = Get-NetworkRiskMatch "$($_.Name) $($_.DisplayName) $($_.PathName) $($_.Description)"
+                $null -ne $match -and -not ($match.Name -eq "Generic VPN/Tunnel" -and (Test-BuiltInWindowsNetworkComponent -Name $_.Name -PathName $_.PathName))
+            } |
+            ForEach-Object {
+                $match = Get-NetworkRiskMatch "$($_.Name) $($_.DisplayName) $($_.PathName) $($_.Description)"
+                $line = "Driver $($_.Name) | State=$($_.State) | Path=$($_.PathName) | Indicator=$($match.Name)"
+                Add-Line $script:NetworkSnapshot $line
+                $script:Report.Add("Network driver indicator: $line")
+                $found = $true
+                Add-UniqueNetworkEvidence -Key "driver:$($_.Name):$($match.Name)" -Source "Driver" -Subject $match.Name -Details "$($match.Kind): $($_.PathName)" -BaseScore $match.BaseScore -Reasons @("System driver matched $($match.Name)")
+            }
+
+        Get-CimInstance Win32_Service -ErrorAction SilentlyContinue |
+            Where-Object {
+                $match = Get-NetworkRiskMatch "$($_.Name) $($_.DisplayName) $($_.PathName) $($_.Description)"
+                $null -ne $match -and -not ($match.Name -eq "Generic VPN/Tunnel" -and (Test-BuiltInWindowsNetworkComponent -Name $_.Name -PathName $_.PathName))
+            } |
+            ForEach-Object {
+                $match = Get-NetworkRiskMatch "$($_.Name) $($_.DisplayName) $($_.PathName) $($_.Description)"
+                $line = "Service $($_.Name) | State=$($_.State) | Path=$($_.PathName) | Indicator=$($match.Name)"
+                Add-Line $script:NetworkSnapshot $line
+                $script:Report.Add("Network service indicator: $line")
+                $found = $true
+                Add-UniqueNetworkEvidence -Key "service:$($_.Name):$($match.Name)" -Source "Service" -Subject $match.Name -Details "$($match.Kind): $($_.PathName)" -BaseScore $match.BaseScore -Reasons @("Service matched $($match.Name)")
+            }
+    }
+    catch {
+        Add-Line $script:NetworkSnapshot "Service/driver collection failed: $($_.Exception.Message)"
+    }
+    Add-Line $script:NetworkSnapshot ""
+
+    Add-Line $script:NetworkSnapshot "== Active TCP Connections (sample) =="
+    try {
+        Get-NetTCPConnection -ErrorAction SilentlyContinue |
+            Where-Object { $_.State -in @("Established", "Listen", "SynSent") } |
+            Sort-Object State, LocalPort |
+            Select-Object -First 150 |
+            ForEach-Object {
+                $processName = Get-ProcessNameByIdSafe -ProcessId $_.OwningProcess
+                $line = "$($_.State) | $($_.LocalAddress):$($_.LocalPort) -> $($_.RemoteAddress):$($_.RemotePort) | PID=$($_.OwningProcess) $processName"
+                Add-Line $script:NetworkSnapshot $line
+                $match = Get-NetworkRiskMatch $processName
+                if ($match) {
+                    $found = $true
+                    Add-UniqueNetworkEvidence -Key "tcp:$($_.OwningProcess):$($match.Name)" -Source "TCPConnection" -Subject $processName -Details "$($match.Kind) has active TCP connection" -BaseScore $match.BaseScore -Reasons @("Risk process has active TCP socket")
+                }
+            }
+    }
+    catch {
+        Add-Line $script:NetworkSnapshot "TCP connection collection failed: $($_.Exception.Message)"
+    }
+    Add-Line $script:NetworkSnapshot ""
+
+    Add-Line $script:NetworkSnapshot "== DNS Cache Indicators =="
+    try {
+        Get-DnsClientCache -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Entry -match "ciroscript|projectcheats|byster|crooked|clumsy|windivert|exitlag|mudfish|wtfast|noping|netlimiter|proxifier"
+            } |
+            Select-Object -First 100 |
+            ForEach-Object {
+                $line = "$($_.Entry) | Type=$($_.Type) | Data=$($_.Data)"
+                Add-Line $script:NetworkSnapshot $line
+                $found = $true
+                Add-UniqueNetworkEvidence -Key "dns:$($_.Entry)" -Source "DnsCache" -Subject $_.Entry -Details "DNS cache matched network/cheat-related keyword" -BaseScore 40 -Reasons @("DNS cache indicator")
+            }
+    }
+    catch {
+        Add-Line $script:NetworkSnapshot "DNS cache collection failed: $($_.Exception.Message)"
+    }
+    Add-Line $script:NetworkSnapshot ""
+
+    Add-Line $script:NetworkSnapshot "== Network Profile Events =="
+    try {
+        Get-WinEvent -FilterHashtable @{ LogName = "Microsoft-Windows-NetworkProfile/Operational"; Id = 10000, 10001; StartTime = $script:StartTime } -ErrorAction SilentlyContinue |
+            Sort-Object TimeCreated -Descending |
+            Select-Object -First 50 |
+            ForEach-Object {
+                $eventText = ([string]$_.Message -replace "`r|`n", " ")
+                $line = "$($_.TimeCreated) | EventID=$($_.Id) | $(Limit-Text -Text $eventText -MaxLength 240)"
+                Add-Line $script:NetworkSnapshot $line
+                if ($_.TimeCreated -and (Test-NearAnyTime -Time $_.TimeCreated -Times $script:GameSessionTimes -Minutes 30)) {
+                    $found = $true
+                    Add-UniqueNetworkEvidence -Key "netprofile:$($_.RecordId)" -Source "NetworkProfile" -Subject "Network connect/disconnect" -Details "Network profile changed near SCUM/BattlEye session" -BaseScore 35 -Reasons @("Network profile event near game session") -Time $_.TimeCreated
+                }
+            }
+    }
+    catch {
+        Add-Line $script:NetworkSnapshot "NetworkProfile event collection failed: $($_.Exception.Message)"
+    }
+
+    if (-not $found) {
+        $script:Report.Add("No known network manipulation, VPN/tunnel, proxy, route-optimizer, or packet driver indicators were observed.")
+        $script:Report.Add("")
+    }
+    else {
+        $script:Report.Add("")
+    }
+}
+
 function Invoke-ScreenshotTrigger {
     if (-not $EnableScreenshotTrigger) { return }
 
@@ -1211,6 +1592,7 @@ function Get-DiscordEvidencePriority {
         "Defender" { $priority += 45 }
         "AntiForensic" { $priority += 45 }
         "BrowserHistory" { $priority += 35 }
+        "NetworkAnomaly" { $priority += 35 }
         "Service" { $priority += 30 }
         "USB" { $priority += 25 }
         "Execution" { $priority += 20 }
@@ -1220,7 +1602,7 @@ function Get-DiscordEvidencePriority {
     }
 
     if ($source -match "4688|Security") { $priority += 20 }
-    if ($reasonText -match "Defender|anti-forensic|Log|USB|Removable|SCUM|BattlEye|Suspicious") { $priority += 15 }
+    if ($reasonText -match "Defender|anti-forensic|Log|USB|Removable|SCUM|BattlEye|Suspicious|proxy|VPN|packet|driver|network") { $priority += 15 }
     if ($path -match '^[A-Z]:\\' -and (Test-RemovablePath $path)) { $priority += 25 }
     if ($path -match '\\AppData\\Local\\Temp\\|\\Downloads\\|\\Desktop\\') { $priority += 10 }
     if ($source -eq "PREFETCH,BAM") { $priority -= 25 }
@@ -1286,9 +1668,17 @@ function Get-DiverseDiscordEvidence {
         if ($selected.Count -ge $DiscordMaxItems) { break }
         $evidence = $item.Evidence
         $key = "$($evidence.Category)|$($evidence.Source)"
-        if ($seenKeys.ContainsKey($key) -and $item.Priority -lt 90) { continue }
+        if ($seenKeys.ContainsKey($key)) { continue }
         $seenKeys[$key] = $true
         $selected.Add($evidence)
+    }
+
+    if ($selected.Count -lt $DiscordMaxItems) {
+        foreach ($item in $ranked) {
+            if ($selected.Count -ge $DiscordMaxItems) { break }
+            if ($selected.Contains($item.Evidence)) { continue }
+            $selected.Add($item.Evidence)
+        }
     }
 
     if ($selected.Count -eq 0 -and $Evidence.Count -gt 0) {
@@ -1355,6 +1745,11 @@ function Get-EvidenceTranslation {
         $operatorAction = "Revisar apenas os hits filtrados no anexo de historico; nao inferir culpa por busca isolada."
         $falsePositive = "Pesquisa curiosa, noticia, denuncia ou discussao em forum pode conter as mesmas palavras."
     }
+    elseif ($category -eq "NetworkAnomaly") {
+        $meaning = "Contexto de rede incomum foi observado, como proxy, VPN/tunel, driver de pacote, route optimizer ou ferramenta de manipulacao de latencia."
+        $operatorAction = "Correlacionar com horario da partida, processos ativos e adaptadores. Este sinal sugere investigacao de possivel fake lag, nao prova abuso sozinho."
+        $falsePositive = "VPNs, ferramentas de diagnostico, capturadores de pacote e otimizadores de rota tambem podem ser usados legitimamente."
+    }
 
     if ($reasonText -match "Removable|USB|remov") {
         $operatorAction += " Priorize checar se houve loader em unidade removivel."
@@ -1364,6 +1759,9 @@ function Get-EvidenceTranslation {
     }
     if ($reasonText -match "Unsigned|signature|assinatura") {
         $operatorAction += " Assinatura ausente aumenta a necessidade de revisao manual."
+    }
+    if ($reasonText -match "VPN|proxy|packet|WinDivert|clumsy|network") {
+        $operatorAction += " Verifique se a ferramenta estava ativa durante a sessao e se ha justificativa operacional."
     }
 
     return [PSCustomObject]@{
@@ -1418,30 +1816,48 @@ function Add-DiscordAttachment {
         [string]$FileName,
         [string[]]$Lines,
         [string]$ContentType = "text/plain; charset=utf-8",
-        [string]$LocalPath
+        [string]$LocalPath,
+        [byte[]]$Bytes
     )
 
-    if (-not $Lines) {
+    if (-not $Bytes -and -not $Lines) {
         $Lines = @("")
     }
 
-    $content = ($Lines -join "`r`n")
-    $bytes = [Text.Encoding]::UTF8.GetBytes($content)
-    if ($bytes.Length -gt $DiscordMaxAttachmentBytes) {
+    $content = $null
+    $attachmentBytes = $Bytes
+
+    if (-not $attachmentBytes) {
+        $content = ($Lines -join "`r`n")
+        $attachmentBytes = [Text.Encoding]::UTF8.GetBytes($content)
+    }
+
+    if ($attachmentBytes.Length -gt $DiscordMaxAttachmentBytes -and -not $Bytes) {
         $keepBytes = [Math]::Max(1024, $DiscordMaxAttachmentBytes - 2048)
-        $content = [Text.Encoding]::UTF8.GetString($bytes, 0, $keepBytes)
-        $content += "`r`n`r`n[TraceUSB truncated this attachment from $($bytes.Length) bytes to fit DiscordMaxAttachmentBytes=$DiscordMaxAttachmentBytes.]"
-        Write-RunLog "Attachment truncated: $FileName ($($bytes.Length) bytes)."
+        $content = [Text.Encoding]::UTF8.GetString($attachmentBytes, 0, $keepBytes)
+        $content += "`r`n`r`n[TraceUSB truncated this attachment from $($attachmentBytes.Length) bytes to fit DiscordMaxAttachmentBytes=$DiscordMaxAttachmentBytes.]"
+        $attachmentBytes = [Text.Encoding]::UTF8.GetBytes($content)
+        Write-RunLog "Attachment truncated: $FileName ($($attachmentBytes.Length) bytes after truncation)."
+    }
+    elseif ($attachmentBytes.Length -gt $DiscordMaxAttachmentBytes) {
+        Write-RunLog "Attachment skipped because it exceeds DiscordMaxAttachmentBytes: $FileName ($($attachmentBytes.Length) bytes)."
+        return
     }
 
     $script:DiscordAttachments.Add([PSCustomObject]@{
         FileName    = $FileName
         Content     = $content
+        Bytes       = $attachmentBytes
         ContentType = $ContentType
     })
 
     if ($SaveDiscordAttachmentsLocal -and $LocalPath) {
-        Set-Content -LiteralPath $LocalPath -Value $content -Encoding UTF8
+        if ($Bytes) {
+            [System.IO.File]::WriteAllBytes($LocalPath, $attachmentBytes)
+        }
+        else {
+            Set-Content -LiteralPath $LocalPath -Value $content -Encoding UTF8
+        }
     }
 }
 
@@ -2176,7 +2592,7 @@ function Write-DiscordPreview {
     $attachmentHtml = New-Object System.Collections.Generic.List[string]
     foreach ($attachment in $script:DiscordAttachments) {
         $attachmentName = [System.Net.WebUtility]::HtmlEncode([string]$attachment.FileName)
-        $attachmentBytes = [Text.Encoding]::UTF8.GetByteCount([string]$attachment.Content)
+        $attachmentBytes = if ($attachment.Bytes) { $attachment.Bytes.Length } else { [Text.Encoding]::UTF8.GetByteCount([string]$attachment.Content) }
         $attachmentHtml.Add("<li>$attachmentName <span class='bytes'>($attachmentBytes bytes)</span></li>")
     }
 
@@ -2397,7 +2813,7 @@ function Send-DiscordWebhook {
         foreach ($attachment in $script:DiscordAttachments) {
             if (-not $attachment -or -not $attachment.FileName) { continue }
 
-            $bytes = [Text.Encoding]::UTF8.GetBytes([string]$attachment.Content)
+            $bytes = if ($attachment.Bytes) { [byte[]]$attachment.Bytes } else { [Text.Encoding]::UTF8.GetBytes([string]$attachment.Content) }
             $fileContent = New-Object -TypeName System.Net.Http.ByteArrayContent -ArgumentList (,$bytes)
             if ($attachment.ContentType) {
                 $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse([string]$attachment.ContentType)
@@ -2489,6 +2905,93 @@ function Publish-DiscordArtifacts {
     Send-DiscordWebhook -Payload $payload
 }
 
+function Get-SafeArtifactFileName {
+    param([string]$FileName)
+
+    if (-not $FileName) { return "artifact.txt" }
+    return ($FileName -replace '[\\/:*?"<>|]+', '_')
+}
+
+function Write-DiscordAttachmentToFile {
+    param(
+        $Attachment,
+        [string]$Directory
+    )
+
+    if (-not $Attachment -or -not $Attachment.FileName) { return $null }
+    $safeName = Get-SafeArtifactFileName $Attachment.FileName
+    $path = Join-Path $Directory $safeName
+    if ($Attachment.Bytes) {
+        [System.IO.File]::WriteAllBytes($path, [byte[]]$Attachment.Bytes)
+    }
+    else {
+        Set-Content -LiteralPath $path -Value ([string]$Attachment.Content) -Encoding UTF8
+    }
+    return $path
+}
+
+function New-CaseBundle {
+    if (-not $EnableCaseBundle) {
+        Write-RunLog "Case bundle disabled."
+        return
+    }
+
+    Ensure-OutputDirectory
+    $caseTemp = Join-Path $script:OutputDirectory ("case_work_$($script:ArtifactSuffix)")
+    if (Test-Path -LiteralPath $caseTemp) {
+        Remove-Item -LiteralPath $caseTemp -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $caseTemp -Force | Out-Null
+
+    try {
+        foreach ($attachment in $script:DiscordAttachments) {
+            Write-DiscordAttachmentToFile -Attachment $attachment -Directory $caseTemp | Out-Null
+        }
+
+        if ([System.IO.File]::Exists($script:RunLogPath)) {
+            Copy-Item -LiteralPath $script:RunLogPath -Destination (Join-Path $caseTemp $script:RunLogFileName) -Force
+        }
+
+        $hashLines = New-Object System.Collections.Generic.List[string]
+        $hashLines.Add("TraceUSB integrity hashes")
+        $hashLines.Add("Generated: $(Get-Date)")
+        $hashLines.Add("CaseBundle: $script:CaseBundleFileName")
+        $hashLines.Add("HashAlgorithm: SHA256")
+        $hashLines.Add("")
+
+        Get-ChildItem -LiteralPath $caseTemp -File |
+            Sort-Object Name |
+            ForEach-Object {
+                $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+                $hashLines.Add("$($hash.Hash)  $($_.Name)")
+            }
+
+        $integrityPathInCase = Join-Path $caseTemp $script:IntegrityHashesFileName
+        Set-Content -LiteralPath $integrityPathInCase -Value $hashLines -Encoding UTF8
+        Set-Content -LiteralPath $script:IntegrityHashesPath -Value $hashLines -Encoding UTF8
+
+        if (Test-Path -LiteralPath $script:CaseBundlePath) {
+            Remove-Item -LiteralPath $script:CaseBundlePath -Force
+        }
+        Compress-Archive -Path (Join-Path $caseTemp "*") -DestinationPath $script:CaseBundlePath -Force
+
+        Add-DiscordAttachment -FileName $script:IntegrityHashesFileName -Lines $hashLines -ContentType "text/plain; charset=utf-8"
+        if ([System.IO.File]::Exists($script:CaseBundlePath)) {
+            $zipBytes = [System.IO.File]::ReadAllBytes($script:CaseBundlePath)
+            Add-DiscordAttachment -FileName $script:CaseBundleFileName -Bytes $zipBytes -ContentType "application/zip"
+            Write-RunLog "Case bundle created: $script:CaseBundlePath ($($zipBytes.Length) bytes)."
+        }
+    }
+    catch {
+        Write-RunLog "Case bundle creation failed: $($_.Exception.Message)"
+        $script:Report.Add("")
+        $script:Report.Add("Case bundle creation failed: $($_.Exception.Message)")
+    }
+    finally {
+        try { Remove-Item -LiteralPath $caseTemp -Recurse -Force } catch {}
+    }
+}
+
 function Write-Outputs {
     Ensure-OutputDirectory
     Write-RunLog "Writing outputs to $script:OutputDirectory."
@@ -2506,6 +3009,14 @@ function Write-Outputs {
             }
     )
     Set-Content -LiteralPath $script:TimelinePath -Value $timelineLines -Encoding UTF8
+    if ($script:NetworkSnapshot.Count -gt 0) {
+        Set-Content -LiteralPath $script:NetworkSnapshotPath -Value $script:NetworkSnapshot -Encoding UTF8
+        Add-DiscordAttachment -FileName $script:NetworkSnapshotFileName -Lines $script:NetworkSnapshot -ContentType "text/plain; charset=utf-8"
+    }
+    if ($script:SystemContext.Count -gt 0) {
+        Set-Content -LiteralPath $script:SystemContextPath -Value $script:SystemContext -Encoding UTF8
+        Add-DiscordAttachment -FileName $script:SystemContextFileName -Lines $script:SystemContext -ContentType "text/plain; charset=utf-8"
+    }
     Write-RunLog "Local report written: $script:ReportPath"
     Write-RunLog "Local timeline written: $script:TimelinePath"
 
@@ -2514,6 +3025,9 @@ function Write-Outputs {
     $script:DiscordAttachmentCount = $script:DiscordAttachments.Count
     Write-RunLog "Local report and timeline added to Discord attachments."
     Write-RunLogFile
+    Add-DiscordAttachment -FileName $script:RunLogFileName -Lines $script:RunLog -ContentType "text/plain; charset=utf-8"
+    New-CaseBundle
+    $script:DiscordAttachmentCount = $script:DiscordAttachments.Count
 
     Publish-DiscordArtifacts
 
@@ -2523,6 +3037,10 @@ function Write-Outputs {
     $script:Report.Add("Discord status: $script:DiscordStatus")
     $script:Report.Add("Discord attachments prepared: $script:DiscordAttachmentCount")
     $script:Report.Add("Run log: $script:RunLogPath")
+    if ([System.IO.File]::Exists($script:NetworkSnapshotPath)) { $script:Report.Add("Network snapshot: $script:NetworkSnapshotPath") }
+    if ([System.IO.File]::Exists($script:SystemContextPath)) { $script:Report.Add("System context: $script:SystemContextPath") }
+    if ([System.IO.File]::Exists($script:IntegrityHashesPath)) { $script:Report.Add("Integrity hashes: $script:IntegrityHashesPath") }
+    if ([System.IO.File]::Exists($script:CaseBundlePath)) { $script:Report.Add("Case bundle: $script:CaseBundlePath") }
     [System.IO.File]::WriteAllLines($script:ReportPath, $script:Report, [System.Text.Encoding]::UTF8)
     Write-RunLog "Final Discord status: $script:DiscordStatus"
     Write-RunLogFile
@@ -2619,6 +3137,7 @@ if ($DiscordSelfTest) {
     return
 }
 
+Collect-SystemContext
 Enable-ProcessAuditPolicy
 Collect-LogClearingEvents
 Collect-UsbEvents
@@ -2628,6 +3147,7 @@ Collect-PrefetchEvents
 Collect-BamEvents
 Collect-ServiceEvents
 Collect-RuntimeContext
+Collect-NetworkAnomalies
 Complete-Correlation
 Invoke-ScreenshotTrigger
 Write-Outputs

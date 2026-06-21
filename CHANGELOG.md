@@ -24,6 +24,10 @@
 - Added `-DiscordSelfTest` to validate webhook connectivity and multipart attachment upload without collecting forensic data.
 - Added `-DiscordTimeoutSeconds`, `-DiscordMaxAttachmentBytes`, and `-VerboseConsole` for webhook reliability and `irm ... | iex` visibility.
 - Discord uploads now include `analise_*.txt` and `timeline_*.txt` alongside evidence, translations, and filtered browser-history attachments.
+- Added `NetworkAnomaly` metadata review for fake-lag/VPN/proxy/packet-driver indicators without packet sniffing.
+- Added `network_snapshot_*.txt` and `system_context_*.txt` artifacts.
+- Added `TraceUSB_case_*.zip` and `integrity_hashes_*.txt` with SHA256 hashes for case review.
+- Added `-EnableNetworkAnomalyScan`, `-DisableNetworkAnomalyScan`, `-EnableCaseBundle`, and `-DisableCaseBundle`.
 - Pester tests with mocked Windows telemetry sources.
 
 ### Changed
