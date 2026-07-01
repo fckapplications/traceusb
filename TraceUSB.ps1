@@ -17,6 +17,8 @@ param(
 
     [switch]$KeepTriggeredOverlayScreenshot,
 
+    [switch]$EnableScreenshotWindowFocus,
+
     [switch]$DisableScreenshotWindowFocus,
 
     [ValidateRange(0, 60)]
@@ -2469,9 +2471,9 @@ function Get-ScreenshotTargetProcess {
 }
 
 function Set-ScreenshotTargetWindowFocus {
-    if ($DisableScreenshotWindowFocus) {
-        $script:Report.Add("Automatic SCUM window focus is disabled by parameter.")
-        Write-RunLog "Screenshot window focus disabled by parameter."
+    if (-not $EnableScreenshotWindowFocus -or $DisableScreenshotWindowFocus) {
+        $script:Report.Add("Automatic SCUM window focus is disabled; manual foreground countdown will be used.")
+        Write-RunLog "Screenshot window focus disabled; manual countdown will be used."
         return $false
     }
 
@@ -2563,6 +2565,19 @@ function Find-NewOverlayScreenshot {
     return @($candidates | Sort-Object LastWriteTime, Length -Descending | Select-Object -First 1)
 }
 
+function Wait-ScreenshotManualFocusCountdown {
+    $waitSeconds = 15
+    $message = "TraceUSB: coloque ou mantenha a janela do SCUM em foco. Hotkey de screenshot em $waitSeconds segundos."
+    $script:Report.Add("Return focus to the SCUM game window manually before the fallback countdown finishes.")
+    Write-RunLog "Manual screenshot foreground countdown started for $waitSeconds second(s)."
+    Write-Host $message
+
+    for ($remaining = $waitSeconds; $remaining -gt 0; $remaining--) {
+        Update-TraceProgress -Stage "Captura via overlay" -PercentComplete 89 -Status "coloque o SCUM em foco; hotkey em ${remaining}s"
+        Start-Sleep -Seconds 1
+    }
+}
+
 function Invoke-ScreenshotTrigger {
     if (-not $EnableScreenshotTrigger) { return }
 
@@ -2614,8 +2629,7 @@ function Invoke-ScreenshotTrigger {
             Start-Sleep -Seconds $ScreenshotFocusWaitSeconds
         }
         else {
-            $script:Report.Add("Return focus to the SCUM game window manually before the fallback countdown finishes.")
-            Start-Sleep -Seconds 15
+            Wait-ScreenshotManualFocusCountdown
         }
 
         $triggerTime = Get-Date

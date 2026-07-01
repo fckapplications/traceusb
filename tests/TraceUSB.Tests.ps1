@@ -54,8 +54,11 @@ Describe "TraceUSB forensic analyzer" {
         $scriptText | Should Match 'TRACEUSB_DISCORD_WEBHOOK_URL'
     }
 
-    It "uses robust SCUM foreground focus before overlay screenshots" {
+    It "keeps SCUM foreground focus experimental and manual countdown as default" {
         $scriptText = Get-Content -Raw -LiteralPath $scriptPath
+        $scriptText | Should Match 'EnableScreenshotWindowFocus'
+        $scriptText | Should Match 'manual foreground countdown will be used'
+        $scriptText | Should Match 'Return focus to the SCUM game window manually'
         $scriptText | Should Match 'ScreenshotFocusAttempts'
         $scriptText | Should Match 'GetVisibleWindowsForProcess'
         $scriptText | Should Match 'ForceForegroundWindow'

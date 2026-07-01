@@ -41,7 +41,7 @@ TraceUSB still:
 Two sensitive actions are opt-in only:
 
 * `-EnableAuditPolicy` enables Process Creation and Process Termination auditing with `auditpol`
-* `-EnableScreenshotTrigger` focuses the SCUM window when possible and sends native NVIDIA/AMD screenshot hotkeys when runtime context is present
+* `-EnableScreenshotTrigger` starts a manual foreground countdown and sends native NVIDIA/AMD screenshot hotkeys when runtime context is present
 
 ---
 
@@ -184,9 +184,9 @@ Opt in to GPU screenshot hotkeys:
 
 This sends the detected NVIDIA/AMD overlay hotkey, searches known overlay
 screenshot folders for a new image, and attaches that image to Discord/case
-outputs when found. TraceUSB first tries to bring the SCUM game window to the
-foreground, so the operator normally does not need to alt-tab manually. TraceUSB
-does not take a desktop screenshot fallback.
+outputs when found. By default, TraceUSB waits for the operator/player to keep
+or return the SCUM game window to the foreground before the hotkey is sent.
+TraceUSB does not take a desktop screenshot fallback.
 
 Create a Discord embed preview without sending anything:
 
@@ -289,11 +289,12 @@ Customize game/session anchors:
 | `-NoOpen` | Off | Prevents Notepad from opening outputs when `-SaveLocalArtifacts` is used |
 | `-SaveLocalArtifacts` | Off | Writes final artifacts locally; public player runs should leave this off |
 | `-EnableAuditPolicy` | Off | Enables Process Creation and Process Termination auditing when running as admin |
-| `-EnableScreenshotTrigger` | Off | Focuses SCUM when possible, sends native GPU screenshot hotkeys, and attaches a detected overlay image |
+| `-EnableScreenshotTrigger` | Off | Starts a manual foreground countdown, sends native GPU screenshot hotkeys, and attaches a detected overlay image |
 | `-KeepTriggeredOverlayScreenshot` | Off | Keeps the overlay screenshot file that TraceUSB triggered instead of deleting it after queueing the attachment |
-| `-DisableScreenshotWindowFocus` | Off | Keeps the old manual-focus behavior before sending the screenshot hotkey |
-| `-ScreenshotFocusWaitSeconds` | `3` | Wait after automatic SCUM focus before sending the overlay hotkey |
-| `-ScreenshotFocusAttempts` | `3` | Number of foreground-focus attempts before falling back to the manual countdown |
+| `-EnableScreenshotWindowFocus` | Off | Experimental: tries to focus SCUM automatically before the overlay hotkey |
+| `-DisableScreenshotWindowFocus` | Off | Compatibility switch that forces the manual foreground countdown |
+| `-ScreenshotFocusWaitSeconds` | `3` | Wait after experimental automatic SCUM focus before sending the overlay hotkey |
+| `-ScreenshotFocusAttempts` | `3` | Number of experimental foreground-focus attempts before falling back to the manual countdown |
 | `-ScreenshotPostTriggerWaitSeconds` | `8` | Wait after hotkey before scanning for a new screenshot file |
 | `-IncludeLowConfidence` | Off | Includes low/context evidence in the readable report |
 | `-EnableDiscordWebhook` | On | Sends a Discord embed when a relay or webhook endpoint is configured |
@@ -435,10 +436,10 @@ client never receives the real Discord URL.
 ## Overlay Screenshot Trigger
 
 `-EnableScreenshotTrigger` is designed for consent-based review when the game is
-running. TraceUSB searches for visible windows owned by the configured
-SCUM/BattlEye process patterns, prioritizes `SCUM.exe`, brings that window to
-the foreground when Windows allows it, verifies that the foreground process is
-the game, then sends the detected GPU overlay screenshot hotkey.
+running. By default, TraceUSB does not try to force the SCUM window into focus.
+It gives a short manual foreground countdown, then sends the detected GPU
+overlay screenshot hotkey and looks for a newly created NVIDIA/AMD screenshot
+file.
 
 This path intentionally favors NVIDIA/AMD overlay screenshots because those
 capture paths can include game-layer visuals that ordinary desktop sharing or
@@ -450,10 +451,11 @@ AMD support uses the default Radeon screenshot hotkey and the common Radeon
 ReLive screenshot folder. Because AMD overlay configuration varies more between
 driver versions, verify it with a collaborator before relying on it operationally.
 
-Windows can still block foreground changes in some exclusive-fullscreen,
-elevated, anti-cheat, or locked-input states. When that happens TraceUSB records
-the failed focus confirmation, waits for the manual fallback countdown, and only
-attaches a screenshot if the NVIDIA/AMD overlay actually creates a new image.
+`-EnableScreenshotWindowFocus` keeps the experimental automatic focus path
+available for controlled testing, but the manual countdown is the operational
+default because focus changes can interfere with overlay capture on some
+systems. TraceUSB only attaches a screenshot if the NVIDIA/AMD overlay actually
+creates a new image.
 
 ---
 

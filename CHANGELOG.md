@@ -11,7 +11,7 @@
 - Portable SQLite reader support through `-PortableSQLitePath`, bundled `tools\sqlite\win-x64\sqlite3.exe`, PATH fallback, and a pinned temporary SQLite tools download.
 - SHA256 validation for bundled/downloaded SQLite tooling.
 - NVIDIA/AMD overlay screenshot detection after `-EnableScreenshotTrigger`, with the captured image queued as a Discord/case-bundle attachment when found.
-- Automatic SCUM window focus before the GPU overlay screenshot hotkey, with `-DisableScreenshotWindowFocus`, `-ScreenshotFocusWaitSeconds`, and `-ScreenshotPostTriggerWaitSeconds` controls.
+- Manual foreground countdown before the GPU overlay screenshot hotkey, with experimental automatic focus available through `-EnableScreenshotWindowFocus`.
 - SCUM/BattlEye session reconstruction through `game_sessions_*.txt`, timeline/evidence entries, and Discord attachments.
 - `-GameSessionDate` and `-DisableGameSessionAnalysis` controls.
 - Memory-only output by default: final reports, run logs, hashes, and case ZIP are prepared as Discord attachments without writing local files.
@@ -28,7 +28,7 @@
 - `-EnableAuditPolicy` now enables Process Termination auditing as well as Process Creation auditing for future close-time visibility.
 - Case bundle creation now runs in memory by default and only writes to disk with `-SaveLocalArtifacts`.
 - Triggered overlay screenshots are removed after being queued in memory unless `-KeepTriggeredOverlayScreenshot` is used.
-- Screenshot focus now enumerates visible process-owned windows, validates the foreground process, and retries through `-ScreenshotFocusAttempts` before falling back to manual focus.
+- Screenshot focus is no longer attempted by default; the previously added robust focus path is retained only as an explicit experimental opt-in.
 
 ### Fixed
 - Oversized Discord uploads can be split into multiple multipart batches instead of silently losing later attachments.
