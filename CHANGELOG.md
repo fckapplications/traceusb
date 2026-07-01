@@ -4,6 +4,7 @@
 
 ### Added
 - Discord relay delivery via `-DiscordRelayUrl` / `TRACEUSB_DISCORD_RELAY_URL`, with optional `X-TraceUSB-Relay-Token` support.
+- Built-in public Cloudflare Worker relay URL for one-command player runs without exposing the real Discord webhook.
 - Reference Cloudflare Worker relay in `relay/cloudflare-worker.js` so the real Discord webhook can stay server-side.
 - `-DiscordDebug` mode to save the Discord payload and attachment manifest without sending HTTP.
 - Discord attachment batching through `-DiscordMaxPayloadBytes` and `-DiscordMaxFilesPerMessage`.
@@ -15,7 +16,7 @@
 - `-GameSessionDate` and `-DisableGameSessionAnalysis` controls.
 
 ### Changed
-- Removed the real Discord webhook URL from script defaults; public builds should use a relay or environment variables.
+- Removed the real Discord webhook URL from script defaults; public builds use the team relay URL instead.
 - Browser-history scans now detect supported databases before resolving/downloading SQLite tooling.
 - Discord delivery status now distinguishes relay, direct webhook, debug, embed-only, attachment, and partial-attachment outcomes.
 - Screenshot triggering now reports whether a new overlay screenshot file was actually detected.

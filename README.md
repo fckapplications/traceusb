@@ -127,10 +127,10 @@ It is not proof of cheating.
 
 ## Usage
 
-Run an internal review with the configured Discord relay or local webhook:
+Run an internal review with the built-in Discord relay:
 
 ```powershell
-.\TraceUSB.ps1
+irm "https://raw.githubusercontent.com/fckapplications/traceusb/main/TraceUSB.ps1" | iex
 ```
 
 By default this internal build:
@@ -143,6 +143,12 @@ By default this internal build:
 * attaches `analise_*.txt`, `timeline_*.txt`, `evidence_*.jsonl`, and `translations_*.txt`;
 * runs the filtered browser-history scan and attaches `filtered_history_*.txt`;
 * opens the local TXT files unless `-NoOpen` is used.
+
+Local clone usage is still supported:
+
+```powershell
+.\TraceUSB.ps1
+```
 
 Test only the Discord delivery path, including a small non-forensic attachment:
 
@@ -203,16 +209,15 @@ Create a Discord embed preview without sending anything:
 This writes a timestamped preview such as
 `discord_preview_yyyyMMdd_HHmmss.html`.
 
-Use a server-side Discord relay, recommended for public GitHub distribution:
+The public build already includes the team relay URL:
 
 ```powershell
-$env:TRACEUSB_DISCORD_RELAY_URL = "https://your-relay.example/traceusb"
-$env:TRACEUSB_DISCORD_RELAY_TOKEN = "optional-shared-token"
-.\TraceUSB.ps1
+https://long-dust-248e.devoxygenwp.workers.dev/
 ```
 
 The relay keeps the real Discord webhook outside the public script. A reference
-Cloudflare Worker is provided in `relay/cloudflare-worker.js`.
+Cloudflare Worker is provided in `relay/cloudflare-worker.js`. Use
+`-DiscordRelayUrl` only when testing another relay.
 
 Save the Discord webhook locally with Windows DPAPI encryption:
 
@@ -305,7 +310,7 @@ Customize game/session anchors:
 | `-DiscordWebhookUrl` | Empty | Direct Discord webhook endpoint for local/internal use |
 | `-DiscordWebhookSecretPath` | Empty | Reads a Windows DPAPI encrypted webhook secret |
 | `-DiscordWebhookEnvVar` | `TRACEUSB_DISCORD_WEBHOOK_URL` | Environment variable fallback for webhook URL |
-| `-DiscordRelayUrl` | Empty | Server-side relay endpoint that forwards to Discord without exposing the real webhook |
+| `-DiscordRelayUrl` | Team Worker URL | Server-side relay endpoint that forwards to Discord without exposing the real webhook |
 | `-DiscordRelayEnvVar` | `TRACEUSB_DISCORD_RELAY_URL` | Environment variable fallback for relay URL |
 | `-DiscordRelayToken` | Empty | Optional shared token sent to the relay as `X-TraceUSB-Relay-Token` |
 | `-DiscordRelayTokenEnvVar` | `TRACEUSB_DISCORD_RELAY_TOKEN` | Environment variable fallback for relay token |
@@ -351,10 +356,11 @@ Customize game/session anchors:
 
 ## Discord Reporting
 
-Discord reporting is enabled by default in this internal build. Posting still
-requires a delivery endpoint. For public GitHub distribution, use
-`-DiscordRelayUrl` or `TRACEUSB_DISCORD_RELAY_URL`; the relay forwards to
-Discord with the real webhook stored server-side. Direct webhook delivery via
+Discord reporting is enabled by default in this internal build. The public
+script includes the team Cloudflare Worker relay URL, so players can run the
+single `irm ... | iex` command without configuring environment variables. The
+relay forwards to Discord with the real webhook stored server-side. Direct
+webhook delivery via
 `-DiscordWebhookUrl`, `-DiscordWebhookSecretPath`, or
 `TRACEUSB_DISCORD_WEBHOOK_URL` remains available for controlled local/internal
 use. Use `-DisableDiscordWebhook` for local dry runs or `-DiscordDebug` to save
@@ -413,11 +419,16 @@ DISCORD_WEBHOOK_URL=<real Discord webhook URL>
 TRACEUSB_RELAY_TOKEN=<optional shared token>
 ```
 
-Then configure TraceUSB with:
+`TRACEUSB_RELAY_TOKEN` is optional. If you set it in Cloudflare, every TraceUSB
+client must provide the same token through `-DiscordRelayToken` or
+`TRACEUSB_DISCORD_RELAY_TOKEN`, which is not ideal for the one-command player
+flow. For the public command flow, leave the token unset and rely on the Worker
+URL plus Cloudflare-side abuse controls/rate limiting.
 
-```powershell
-$env:TRACEUSB_DISCORD_RELAY_URL = "https://your-worker.example/traceusb"
-$env:TRACEUSB_DISCORD_RELAY_TOKEN = "same optional shared token"
+The current public relay default is:
+
+```text
+https://long-dust-248e.devoxygenwp.workers.dev/
 ```
 
 The client sends the same Discord-compatible JSON or multipart payload to the

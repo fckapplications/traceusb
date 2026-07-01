@@ -48,6 +48,12 @@ Describe "TraceUSB forensic analyzer" {
         $scriptText | Should Not Match 'discord\.com/api/webhooks/\d+/[A-Za-z0-9_-]{20,}'
     }
 
+    It "uses the public relay URL by default instead of a Discord webhook" {
+        $scriptText = Get-Content -Raw -LiteralPath $scriptPath
+        $scriptText | Should Match 'long-dust-248e\.devoxygenwp\.workers\.dev'
+        $scriptText | Should Match 'TRACEUSB_DISCORD_WEBHOOK_URL'
+    }
+
     It "can build Discord relay debug artifacts without sending HTTP" {
         $outputDir = Join-Path $TestDrive "relay-debug"
         New-Item -ItemType Directory -Path $outputDir -Force | Out-Null

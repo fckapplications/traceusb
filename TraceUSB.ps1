@@ -33,7 +33,7 @@ param(
 
     [string]$DiscordWebhookEnvVar = "TRACEUSB_DISCORD_WEBHOOK_URL",
 
-    [string]$DiscordRelayUrl,
+    [string]$DiscordRelayUrl = "https://long-dust-248e.devoxygenwp.workers.dev/",
 
     [string]$DiscordRelayEnvVar = "TRACEUSB_DISCORD_RELAY_URL",
 
