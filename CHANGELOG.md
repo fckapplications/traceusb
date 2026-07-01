@@ -27,6 +27,7 @@
 - `-EnableAuditPolicy` now enables Process Termination auditing as well as Process Creation auditing for future close-time visibility.
 - Case bundle creation now runs in memory by default and only writes to disk with `-SaveLocalArtifacts`.
 - Triggered overlay screenshots are removed after being queued in memory unless `-KeepTriggeredOverlayScreenshot` is used.
+- Screenshot focus now enumerates visible process-owned windows, validates the foreground process, and retries through `-ScreenshotFocusAttempts` before falling back to manual focus.
 
 ### Fixed
 - Oversized Discord uploads can be split into multiple multipart batches instead of silently losing later attachments.

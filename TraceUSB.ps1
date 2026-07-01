@@ -22,6 +22,9 @@ param(
     [ValidateRange(0, 60)]
     [int]$ScreenshotFocusWaitSeconds = 3,
 
+    [ValidateRange(1, 10)]
+    [int]$ScreenshotFocusAttempts = 3,
+
     [ValidateRange(1, 60)]
     [int]$ScreenshotPostTriggerWaitSeconds = 8,
 
@@ -2108,10 +2111,38 @@ function Ensure-WindowApi {
 
     Add-Type -TypeDefinition @"
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public static class TraceUsbWindowApi
 {
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern int GetWindowTextLength(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
@@ -2120,6 +2151,121 @@ public static class TraceUsbWindowApi
 
     [DllImport("user32.dll")]
     public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetActiveWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetFocus(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    private static readonly IntPtr HWND_TOP = IntPtr.Zero;
+    private const int SW_SHOW = 5;
+    private const int SW_RESTORE = 9;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_SHOWWINDOW = 0x0040;
+    private const byte VK_MENU = 0x12;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
+
+    public static int GetWindowProcessId(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return 0;
+        uint pid;
+        GetWindowThreadProcessId(hWnd, out pid);
+        return (int)pid;
+    }
+
+    public static string GetWindowTitle(IntPtr hWnd)
+    {
+        int length = GetWindowTextLength(hWnd);
+        if (length <= 0) return "";
+        StringBuilder builder = new StringBuilder(length + 1);
+        GetWindowText(hWnd, builder, builder.Capacity);
+        return builder.ToString();
+    }
+
+    public static IntPtr[] GetVisibleWindowsForProcess(int processId)
+    {
+        List<IntPtr> handles = new List<IntPtr>();
+        EnumWindows(delegate (IntPtr hWnd, IntPtr lParam)
+        {
+            if (!IsWindowVisible(hWnd)) return true;
+            uint pid;
+            GetWindowThreadProcessId(hWnd, out pid);
+            if ((int)pid == processId)
+            {
+                handles.Add(hWnd);
+            }
+            return true;
+        }, IntPtr.Zero);
+        return handles.ToArray();
+    }
+
+    public static bool IsForegroundProcess(int processId)
+    {
+        return GetWindowProcessId(GetForegroundWindow()) == processId;
+    }
+
+    public static bool ForceForegroundWindow(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return false;
+
+        uint targetPid;
+        uint targetThread = GetWindowThreadProcessId(hWnd, out targetPid);
+        uint currentThread = GetCurrentThreadId();
+        IntPtr foreground = GetForegroundWindow();
+        uint foregroundPid;
+        uint foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out foregroundPid);
+
+        bool attachedForeground = false;
+        bool attachedTarget = false;
+
+        try
+        {
+            if (foregroundThread != 0 && foregroundThread != currentThread)
+            {
+                attachedForeground = AttachThreadInput(currentThread, foregroundThread, true);
+            }
+            if (targetThread != 0 && targetThread != currentThread)
+            {
+                attachedTarget = AttachThreadInput(currentThread, targetThread, true);
+            }
+
+            if (IsIconic(hWnd))
+            {
+                ShowWindowAsync(hWnd, SW_RESTORE);
+            }
+            else
+            {
+                ShowWindowAsync(hWnd, SW_SHOW);
+            }
+
+            keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
+            keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+
+            BringWindowToTop(hWnd);
+            SetWindowPos(hWnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            SetActiveWindow(hWnd);
+            SetFocus(hWnd);
+            SetForegroundWindow(hWnd);
+        }
+        finally
+        {
+            if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
+            if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
+        }
+
+        return GetWindowProcessId(GetForegroundWindow()) == (int)targetPid;
+    }
 }
 "@
 }
@@ -2143,12 +2289,19 @@ function Test-ProcessMatchesGamePattern {
     return $false
 }
 
+function Format-WindowHandle {
+    param([IntPtr]$Handle)
+
+    if (-not $Handle -or $Handle -eq [IntPtr]::Zero) { return "0x0" }
+    return ("0x{0:X}" -f $Handle.ToInt64())
+}
+
 function Get-ScreenshotTargetProcess {
+    Ensure-WindowApi
     $candidates = New-Object System.Collections.Generic.List[object]
 
     foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
         if (-not (Test-ProcessMatchesGamePattern -Process $process)) { continue }
-        if (-not $process.MainWindowHandle -or $process.MainWindowHandle -eq [IntPtr]::Zero) { continue }
 
         $rank = 50
         if ($process.ProcessName -match '^SCUM$') { $rank = 0 }
@@ -2156,14 +2309,41 @@ function Get-ScreenshotTargetProcess {
         elseif ($process.ProcessName -match 'SCUM_Launcher') { $rank = 30 }
         elseif ($process.ProcessName -match 'BEService') { $rank = 90 }
 
-        $candidates.Add([PSCustomObject]@{
-            Process = $process
-            Rank    = $rank
-            Title   = [string]$process.MainWindowTitle
-        }) | Out-Null
+        $handles = @()
+        if ($process.MainWindowHandle -and $process.MainWindowHandle -ne [IntPtr]::Zero) {
+            $handles += [IntPtr]$process.MainWindowHandle
+        }
+
+        try {
+            $handles += @([TraceUsbWindowApi]::GetVisibleWindowsForProcess([int]$process.Id))
+        }
+        catch {
+            Write-RunLog "Could not enumerate windows for $($process.ProcessName).exe PID=$($process.Id): $($_.Exception.Message)"
+        }
+
+        foreach ($handle in @($handles | Where-Object { $_ -and $_ -ne [IntPtr]::Zero } | Select-Object -Unique)) {
+            $title = ""
+            try {
+                $title = [TraceUsbWindowApi]::GetWindowTitle([IntPtr]$handle)
+            }
+            catch {
+                $title = [string]$process.MainWindowTitle
+            }
+
+            $titleRank = if ([string]::IsNullOrWhiteSpace($title)) { 10 } else { 0 }
+            if ($title -match 'SCUM') { $titleRank -= 5 }
+
+            $candidates.Add([PSCustomObject]@{
+                Process   = $process
+                Rank      = $rank
+                TitleRank = $titleRank
+                Title     = [string]$title
+                Handle    = [IntPtr]$handle
+            }) | Out-Null
+        }
     }
 
-    return @($candidates | Sort-Object Rank, Title | Select-Object -First 1)
+    return @($candidates | Sort-Object Rank, TitleRank, Title | Select-Object -First 1)
 }
 
 function Set-ScreenshotTargetWindowFocus {
@@ -2182,25 +2362,31 @@ function Set-ScreenshotTargetWindowFocus {
 
     try {
         Ensure-WindowApi
-        $handle = [IntPtr]$target.Process.MainWindowHandle
-        if ([TraceUsbWindowApi]::IsIconic($handle)) {
-            [TraceUsbWindowApi]::ShowWindowAsync($handle, 9) | Out-Null
-        }
-        else {
-            [TraceUsbWindowApi]::ShowWindowAsync($handle, 5) | Out-Null
-        }
+        $handle = [IntPtr]$target.Handle
+        $details = "Target=$($target.Process.ProcessName).exe PID=$($target.Process.Id) Handle=$(Format-WindowHandle $handle) Title=$($target.Title)"
 
-        Start-Sleep -Milliseconds 300
-        $focused = [TraceUsbWindowApi]::SetForegroundWindow($handle)
-        $details = "Target=$($target.Process.ProcessName).exe PID=$($target.Process.Id) Title=$($target.Title)"
-
-        if ($focused) {
-            $script:Report.Add("Focused SCUM window before overlay screenshot trigger. $details")
-            Write-RunLog "Focused screenshot target window. $details"
-            return $true
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+            $shell.AppActivate([int]$target.Process.Id) | Out-Null
+            Start-Sleep -Milliseconds 250
+        }
+        catch {
+            Write-RunLog "WScript AppActivate failed for screenshot target: $($_.Exception.Message)"
         }
 
-        $script:Report.Add("Attempted to focus SCUM window before overlay screenshot trigger, but Windows did not confirm foreground focus. $details")
+        for ($attempt = 1; $attempt -le $ScreenshotFocusAttempts; $attempt++) {
+            [TraceUsbWindowApi]::ForceForegroundWindow($handle) | Out-Null
+            Start-Sleep -Milliseconds 450
+
+            if ([TraceUsbWindowApi]::IsForegroundProcess([int]$target.Process.Id)) {
+                $script:Report.Add("Focused SCUM window before overlay screenshot trigger. $details Attempts=$attempt")
+                Write-RunLog "Focused screenshot target window. $details Attempts=$attempt"
+                return $true
+            }
+        }
+
+        $foregroundPid = [TraceUsbWindowApi]::GetWindowProcessId([TraceUsbWindowApi]::GetForegroundWindow())
+        $script:Report.Add("Attempted to focus SCUM window before overlay screenshot trigger, but Windows did not confirm foreground focus. $details ForegroundPid=$foregroundPid Attempts=$ScreenshotFocusAttempts")
         Write-RunLog "Screenshot target focus attempted but not confirmed. $details"
         return $false
     }

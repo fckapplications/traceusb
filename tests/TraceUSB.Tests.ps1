@@ -54,6 +54,15 @@ Describe "TraceUSB forensic analyzer" {
         $scriptText | Should Match 'TRACEUSB_DISCORD_WEBHOOK_URL'
     }
 
+    It "uses robust SCUM foreground focus before overlay screenshots" {
+        $scriptText = Get-Content -Raw -LiteralPath $scriptPath
+        $scriptText | Should Match 'ScreenshotFocusAttempts'
+        $scriptText | Should Match 'GetVisibleWindowsForProcess'
+        $scriptText | Should Match 'ForceForegroundWindow'
+        $scriptText | Should Match 'IsForegroundProcess'
+        $scriptText | Should Match 'WScript\.Shell'
+    }
+
     It "can build Discord relay debug artifacts without sending HTTP" {
         $outputDir = Join-Path $TestDrive "relay-debug"
         New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
