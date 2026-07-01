@@ -78,6 +78,88 @@ Describe "TraceUSB forensic analyzer" {
         $scriptText | Should Match 'DisablePortableSQLiteDownload'
     }
 
+    It "reconstructs SCUM and BattlEye start, close, and duration context" {
+        $sessionDate = [datetime]"2026-07-01"
+        $gameStart = $sessionDate.AddHours(14).AddMinutes(12)
+        $gameEnd = $sessionDate.AddHours(15).AddMinutes(48).AddSeconds(21)
+        $beStart = $sessionDate.AddHours(14).AddMinutes(10).AddSeconds(55)
+        $beEnd = $sessionDate.AddHours(15).AddMinutes(49).AddSeconds(2)
+        $outputDir = Join-Path $TestDrive "sessions-out"
+        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+
+        Mock Get-WinEvent {
+            $ids = @($FilterHashtable.Id)
+
+            if ($FilterHashtable.LogName -eq "Security" -and $ids -contains 4688) {
+                return @(
+                    (New-FakeEvent -Id 4688 -TimeCreated $gameStart -Data @{
+                        NewProcessName = "C:\Program Files (x86)\Steam\steamapps\common\SCUM\SCUM\Binaries\Win64\SCUM.exe"
+                        NewProcessId = "0x54a4"
+                        ParentProcessName = "C:\Program Files (x86)\Steam\steam.exe"
+                        SubjectUserSid = "S-1-5-21-test"
+                    })
+                )
+            }
+
+            if ($FilterHashtable.LogName -eq "Security" -and $ids -contains 4689) {
+                return @(
+                    (New-FakeEvent -Id 4689 -TimeCreated $gameEnd -Data @{
+                        ProcessName = "C:\Program Files (x86)\Steam\steamapps\common\SCUM\SCUM\Binaries\Win64\SCUM.exe"
+                        ProcessId = "0x54a4"
+                        SubjectUserSid = "S-1-5-21-test"
+                    })
+                )
+            }
+
+            if ($FilterHashtable.LogName -eq "System" -and $ids -contains 7036) {
+                return @(
+                    (New-FakeEvent -Id 7036 -TimeCreated $beStart -Data @{
+                        param1 = "BattlEye Service"
+                        param2 = "running"
+                    }),
+                    (New-FakeEvent -Id 7036 -TimeCreated $beEnd -Data @{
+                        param1 = "BattlEye Service"
+                        param2 = "stopped"
+                    })
+                )
+            }
+
+            return @()
+        }
+
+        Mock Get-PnpDevice { return @() }
+        Mock Get-PnpDeviceProperty { return @() }
+        Mock Get-CimInstance { return @() }
+        Mock Get-Process { return @() }
+        Mock Get-ChildItem { return @() }
+        Mock Get-ItemProperty { return $null }
+        Mock Get-AuthenticodeSignature { return [PSCustomObject]@{ Status = "NotSigned"; SignerCertificate = $null } }
+        Mock Start-Process { throw "Start-Process should not run with -NoOpen" }
+
+        & $scriptPath `
+            -OutputDirectory $outputDir `
+            -NoOpen `
+            -GameSessionDate $sessionDate `
+            -DisableDiscordWebhook `
+            -DisableBrowserHistoryScan `
+            -DisableNetworkAnomalyScan `
+            -DisableCaseBundle
+
+        $gameSessionFiles = [System.IO.Directory]::GetFiles($outputDir, "game_sessions_*.txt")
+        $gameSessionFiles.Count | Should Be 1
+
+        $gameSessions = Get-Content -Raw -LiteralPath $gameSessionFiles[0]
+        $gameSessions | Should Match "SCUM Game"
+        $gameSessions | Should Match "BattlEye Service"
+        $gameSessions | Should Match "Status: Closed"
+        $gameSessions | Should Match "Exact start/end from Windows event logs"
+        $gameSessions | Should Match "Duration:"
+
+        $timeline = Get-Content -Raw -LiteralPath ([System.IO.Directory]::GetFiles($outputDir, "timeline_*.txt") | Select-Object -First 1)
+        $timeline | Should Match "GameSession"
+        $timeline | Should Match "SCUM Game ended"
+    }
+
     It "correlates USB, 4688, Prefetch, BAM, Defender, and SCUM context" {
         $now = Get-Date
         $loaderTime = $now.AddMinutes(-10)

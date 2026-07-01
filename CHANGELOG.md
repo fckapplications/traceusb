@@ -10,12 +10,18 @@
 - Portable SQLite reader support through `-PortableSQLitePath`, bundled `tools\sqlite\win-x64\sqlite3.exe`, PATH fallback, and a pinned temporary SQLite tools download.
 - SHA256 validation for bundled/downloaded SQLite tooling.
 - NVIDIA/AMD overlay screenshot detection after `-EnableScreenshotTrigger`, with the captured image queued as a Discord/case-bundle attachment when found.
+- Automatic SCUM window focus before the GPU overlay screenshot hotkey, with `-DisableScreenshotWindowFocus`, `-ScreenshotFocusWaitSeconds`, and `-ScreenshotPostTriggerWaitSeconds` controls.
+- SCUM/BattlEye session reconstruction through `game_sessions_*.txt`, timeline/evidence entries, and Discord attachments.
+- `-GameSessionDate` and `-DisableGameSessionAnalysis` controls.
 
 ### Changed
 - Removed the real Discord webhook URL from script defaults; public builds should use a relay or environment variables.
 - Browser-history scans now detect supported databases before resolving/downloading SQLite tooling.
 - Discord delivery status now distinguishes relay, direct webhook, debug, embed-only, attachment, and partial-attachment outcomes.
 - Screenshot triggering now reports whether a new overlay screenshot file was actually detected.
+- Text attachments are emitted with a UTF-8 BOM when appropriate so Discord previews render accents such as `Brasilia` correctly.
+- Game process context now separates exact start/end sessions from partial evidence when Security 4689 or service stop events are unavailable.
+- `-EnableAuditPolicy` now enables Process Termination auditing as well as Process Creation auditing for future close-time visibility.
 
 ### Fixed
 - Oversized Discord uploads can be split into multiple multipart batches instead of silently losing later attachments.

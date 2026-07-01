@@ -3,6 +3,8 @@ param(
     [ValidateRange(1, 720)]
     [int]$LookbackHours = 24,
 
+    [datetime]$GameSessionDate = (Get-Date).Date,
+
     [string]$OutputDirectory = [Environment]::GetFolderPath("Desktop"),
 
     [switch]$NoOpen,
@@ -10,6 +12,14 @@ param(
     [switch]$EnableAuditPolicy,
 
     [switch]$EnableScreenshotTrigger,
+
+    [switch]$DisableScreenshotWindowFocus,
+
+    [ValidateRange(0, 60)]
+    [int]$ScreenshotFocusWaitSeconds = 3,
+
+    [ValidateRange(1, 60)]
+    [int]$ScreenshotPostTriggerWaitSeconds = 8,
 
     [switch]$IncludeLowConfidence,
 
@@ -117,6 +127,8 @@ param(
 
     [switch]$DisableNetworkAnomalyScan,
 
+    [switch]$DisableGameSessionAnalysis,
+
     [switch]$EnableCaseBundle = $true,
 
     [switch]$DisableCaseBundle,
@@ -179,6 +191,7 @@ $script:TimelineFileName = "timeline_$($script:ArtifactSuffix).txt"
 $script:EvidenceFileName = "evidence_$($script:ArtifactSuffix).jsonl"
 $script:TranslationsFileName = "translations_$($script:ArtifactSuffix).txt"
 $script:FilteredHistoryFileName = "filtered_history_$($script:ArtifactSuffix).txt"
+$script:GameSessionsFileName = "game_sessions_$($script:ArtifactSuffix).txt"
 $script:NetworkSnapshotFileName = "network_snapshot_$($script:ArtifactSuffix).txt"
 $script:SystemContextFileName = "system_context_$($script:ArtifactSuffix).txt"
 $script:IntegrityHashesFileName = "integrity_hashes_$($script:ArtifactSuffix).txt"
@@ -191,6 +204,7 @@ $script:TimelinePath = Join-Path $script:OutputDirectory $script:TimelineFileNam
 $script:EvidencePath = Join-Path $script:OutputDirectory $script:EvidenceFileName
 $script:TranslationsPath = Join-Path $script:OutputDirectory $script:TranslationsFileName
 $script:FilteredHistoryPath = Join-Path $script:OutputDirectory $script:FilteredHistoryFileName
+$script:GameSessionsPath = Join-Path $script:OutputDirectory $script:GameSessionsFileName
 $script:NetworkSnapshotPath = Join-Path $script:OutputDirectory $script:NetworkSnapshotFileName
 $script:SystemContextPath = Join-Path $script:OutputDirectory $script:SystemContextFileName
 $script:IntegrityHashesPath = Join-Path $script:OutputDirectory $script:IntegrityHashesFileName
@@ -203,6 +217,8 @@ $script:Report = New-Object System.Collections.Generic.List[string]
 $script:Timeline = New-Object System.Collections.Generic.List[object]
 $script:Evidence = New-Object System.Collections.Generic.List[object]
 $script:FilteredHistoryHits = New-Object System.Collections.Generic.List[object]
+$script:GameSessions = New-Object System.Collections.ArrayList
+$script:GameSessionLines = New-Object System.Collections.Generic.List[string]
 $script:NetworkSnapshot = New-Object System.Collections.Generic.List[string]
 $script:SystemContext = New-Object System.Collections.Generic.List[string]
 $script:DiscordAttachments = New-Object System.Collections.ArrayList
@@ -304,6 +320,32 @@ function Add-Line {
     )
 
     $List.Add($Line)
+}
+
+function Convert-TextToUtf8Bytes {
+    param(
+        [string]$Text,
+        [switch]$Bom
+    )
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $body = $utf8NoBom.GetBytes([string]$Text)
+    if (-not $Bom) { return [byte[]]$body }
+
+    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+    $preamble = $utf8Bom.GetPreamble()
+    $bytes = New-Object byte[] ($preamble.Length + $body.Length)
+    if ($preamble.Length -gt 0) {
+        [Buffer]::BlockCopy($preamble, 0, $bytes, 0, $preamble.Length)
+    }
+    [Buffer]::BlockCopy($body, 0, $bytes, $preamble.Length, $body.Length)
+    return [byte[]]$bytes
+}
+
+function Test-DiscordAttachmentNeedsBom {
+    param([string]$ContentType)
+
+    return ([string]$ContentType -match '^text/plain\b')
 }
 
 function Test-IsAdministrator {
@@ -471,6 +513,25 @@ function Get-ExeNameFromPath {
     }
 
     return $FallbackName
+}
+
+function Convert-EventProcessId {
+    param([string]$Value)
+
+    if (-not $Value) { return $null }
+
+    $clean = ([string]$Value).Trim()
+    try {
+        if ($clean -match '^0x[0-9a-fA-F]+$') {
+            return [Convert]::ToInt32($clean.Substring(2), 16)
+        }
+        if ($clean -match '^\d+$') {
+            return [int]$clean
+        }
+    }
+    catch {}
+
+    return $null
 }
 
 function Test-NameMatchesAny {
@@ -739,6 +800,7 @@ function Get-ProcessCreationData {
     }
 
     $userSid = Get-EventDataValue -Map $map -Names @("SubjectUserSid", "TargetUserSid")
+    $processId = Convert-EventProcessId (Get-EventDataValue -Map $map -Names @("NewProcessId", "ProcessId"))
 
     $cleanPath = Normalize-ExecutablePath $path
     $cleanParent = Normalize-ExecutablePath $parentPath
@@ -749,6 +811,35 @@ function Get-ProcessCreationData {
         ParentPath = $cleanParent
         ExeName    = $exeName
         UserSid    = $userSid
+        ProcessId  = $processId
+    }
+}
+
+function Get-ProcessTerminationData {
+    param($Event)
+
+    $map = Get-EventDataMap $Event
+    $message = [string]$Event.Message
+
+    $path = Get-EventDataValue -Map $map -Names @("ProcessName", "NewProcessName")
+    if (-not $path) {
+        $path = Get-MessageValue -Message $message -Patterns @(
+            'Nome do Processo:\s+(.+)',
+            'Process Name:\s+(.+)'
+        )
+    }
+
+    $userSid = Get-EventDataValue -Map $map -Names @("SubjectUserSid", "TargetUserSid")
+    $processId = Convert-EventProcessId (Get-EventDataValue -Map $map -Names @("ProcessId", "NewProcessId"))
+
+    $cleanPath = Normalize-ExecutablePath $path
+    $exeName = Get-ExeNameFromPath -Path $cleanPath -FallbackName $null
+
+    return [PSCustomObject]@{
+        Path      = $cleanPath
+        ExeName   = $exeName
+        UserSid   = $userSid
+        ProcessId = $processId
     }
 }
 
@@ -1080,6 +1171,541 @@ function Collect-ServiceEvents {
         $script:Report.Add("Service: $serviceName")
         $script:Report.Add("Path: $cleanPath")
         $script:Report.Add("Type: $serviceType")
+        $script:Report.Add("")
+    }
+}
+
+function Format-TraceDuration {
+    param([Nullable[TimeSpan]]$Duration)
+
+    if (-not $Duration -or $Duration.Value.TotalSeconds -lt 0) { return "Unknown" }
+
+    $span = $Duration.Value
+    $parts = New-Object System.Collections.Generic.List[string]
+    if ($span.Days -gt 0) { $parts.Add("$($span.Days)d") }
+    if ($span.Hours -gt 0) { $parts.Add("$($span.Hours)h") }
+    if ($span.Minutes -gt 0) { $parts.Add("$($span.Minutes)m") }
+    if ($parts.Count -eq 0 -or $span.Seconds -gt 0) { $parts.Add("$($span.Seconds)s") }
+    return ($parts -join " ")
+}
+
+function Get-GameProcessRole {
+    param(
+        [string]$ExeName,
+        [string]$Path,
+        [string]$ServiceName
+    )
+
+    $text = (@($ExeName, $Path, $ServiceName) | Where-Object { $_ }) -join " "
+    if (-not $text) { return $null }
+
+    if ($text -match '(?i)\bBEService(_x64)?(\.exe)?\b|BattlEye Service|\\BattlEye\\') {
+        return "BattlEye Service"
+    }
+    if ($text -match '(?i)\bSCUM_Launcher\.exe\b') {
+        return "SCUM Launcher / BattlEye Bootstrap"
+    }
+    if ($text -match '(?i)\bSCUM(-Win64-Shipping)?\.exe\b') {
+        return "SCUM Game"
+    }
+    if ($ExeName -and (Test-NameMatchesAny -Name $ExeName -Patterns $GameProcessPatterns)) {
+        return "SCUM/BattlEye Context"
+    }
+
+    return $null
+}
+
+function Get-GameSessionWindow {
+    $start = $GameSessionDate.Date
+    return [PSCustomObject]@{
+        Start = $start
+        End   = $start.AddDays(1)
+    }
+}
+
+function Get-ProcessStartTimeSafe {
+    param($Process)
+
+    try {
+        if ($Process.StartTime) { return [datetime]$Process.StartTime }
+    }
+    catch {}
+
+    return $null
+}
+
+function Get-ProcessPathSafe {
+    param($Process)
+
+    try {
+        if ($Process.Path) { return (Normalize-ExecutablePath $Process.Path) }
+    }
+    catch {}
+
+    try {
+        if ($Process.MainModule -and $Process.MainModule.FileName) {
+            return (Normalize-ExecutablePath $Process.MainModule.FileName)
+        }
+    }
+    catch {}
+
+    return $null
+}
+
+function New-GameSessionPoint {
+    param(
+        [int]$Index,
+        [datetime]$Time,
+        [string]$Role,
+        [string]$ProcessName,
+        [Nullable[int]]$ProcessId,
+        [string]$Path,
+        [string]$ServiceName,
+        [string]$Source,
+        [Nullable[int]]$EventId
+    )
+
+    return [PSCustomObject]@{
+        Index       = $Index
+        Time        = $Time
+        Role        = $Role
+        ProcessName = $ProcessName
+        ProcessId   = $ProcessId
+        Path        = $Path
+        ServiceName = $ServiceName
+        Source      = $Source
+        EventId     = $EventId
+    }
+}
+
+function Test-GameSessionPointMatch {
+    param(
+        $Start,
+        $Stop
+    )
+
+    if (-not $Start -or -not $Stop) { return $false }
+    if ($Start.Role -ne $Stop.Role) { return $false }
+    if ($Stop.Time -lt $Start.Time) { return $false }
+
+    if ($Start.ProcessId -and $Stop.ProcessId -and $Start.ProcessId -eq $Stop.ProcessId) {
+        return $true
+    }
+
+    if ($Start.Path -and $Stop.Path -and $Start.Path -ieq $Stop.Path) {
+        return $true
+    }
+
+    if ($Start.ServiceName -and $Stop.ServiceName -and $Start.ServiceName -ieq $Stop.ServiceName) {
+        return $true
+    }
+
+    if ($Start.ProcessName -and $Stop.ProcessName -and $Start.ProcessName -ieq $Stop.ProcessName) {
+        return $true
+    }
+
+    return $false
+}
+
+function Add-GameSessionRecord {
+    param(
+        [string]$Role,
+        [string]$Status,
+        [AllowNull()]$Started,
+        [AllowNull()]$Ended,
+        [AllowNull()]$ObservedUntil,
+        [string]$ProcessName,
+        [Nullable[int]]$ProcessId,
+        [string]$Path,
+        [string]$ServiceName,
+        [string]$StartSource,
+        [string]$EndSource,
+        [string]$Quality,
+        [string[]]$Notes
+    )
+
+    $duration = $null
+    if ($Started -and $Ended) {
+        $duration = [datetime]$Ended - [datetime]$Started
+    }
+    elseif ($Started -and $ObservedUntil) {
+        $duration = [datetime]$ObservedUntil - [datetime]$Started
+    }
+
+    $session = [PSCustomObject]@{
+        Role          = $Role
+        Status        = $Status
+        Started       = $Started
+        Ended         = $Ended
+        ObservedUntil = $ObservedUntil
+        Duration      = $duration
+        ProcessName   = $ProcessName
+        ProcessId     = $ProcessId
+        Path          = $Path
+        ServiceName   = $ServiceName
+        StartSource   = $StartSource
+        EndSource     = $EndSource
+        Quality       = $Quality
+        Notes         = @($Notes | Where-Object { $_ })
+    }
+
+    $script:GameSessions.Add($session) | Out-Null
+
+    $confidence = if ($Started -and $Ended) { 40 } elseif ($Started -or $ObservedUntil) { 30 } else { 20 }
+    $evidenceTime = if ($Started) { $Started } elseif ($Ended) { $Ended } else { Get-Date }
+    $source = if ($StartSource) { $StartSource } elseif ($EndSource) { $EndSource } else { "GameSessionAnalysis" }
+    $details = "$Role | Status=$Status"
+    if ($ProcessName) { $details += " | Process=$ProcessName" }
+    if ($ProcessId) { $details += " | PID=$ProcessId" }
+    if ($Started) { $details += " | Started=$Started" }
+    if ($Ended) { $details += " | Ended=$Ended" }
+    if ($duration) { $details += " | Duration=$(Format-TraceDuration -Duration $duration)" }
+
+    Add-Evidence -Time $evidenceTime -Category "GameSession" -Source $source -ExeName $ProcessName -Path $Path -Confidence $confidence -Reasons @("SCUM/BattlEye session activity reconstructed", $Quality) -Details $details | Out-Null
+
+    if ($Started) {
+        $script:GameSessionTimes.Add([datetime]$Started)
+    }
+    if ($Ended) {
+        $script:GameSessionTimes.Add([datetime]$Ended)
+        Add-TimelineEvent -Time $Ended -Category "GameSession" -Event "$Role ended" -Details $details
+    }
+}
+
+function Get-ServiceStateData {
+    param($Event)
+
+    $map = Get-EventDataMap $Event
+    $message = [string]$Event.Message
+
+    $serviceName = Get-EventDataValue -Map $map -Names @("ServiceName", "param1")
+    $state = Get-EventDataValue -Map $map -Names @("State", "param2")
+
+    if (-not $serviceName -or -not $state) {
+        $match = [regex]::Match($message, 'The\s+(.+?)\s+service entered the\s+(.+?)\s+state', "IgnoreCase")
+        if (-not $match.Success) {
+            $match = [regex]::Match($message, 'O servico\s+(.+?)\s+entrou no estado\s+(.+?)(\.|$)', "IgnoreCase")
+        }
+        if (-not $match.Success) {
+            $match = [regex]::Match($message, 'O serviço\s+(.+?)\s+entrou no estado\s+(.+?)(\.|$)', "IgnoreCase")
+        }
+        if ($match.Success) {
+            if (-not $serviceName) { $serviceName = $match.Groups[1].Value.Trim() }
+            if (-not $state) { $state = $match.Groups[2].Value.Trim() }
+        }
+    }
+
+    return [PSCustomObject]@{
+        ServiceName = $serviceName
+        State       = $state
+    }
+}
+
+function Test-ServiceStateRunning {
+    param([string]$State)
+
+    return ([string]$State -match '(?i)running|run|em execucao|em execução|iniciado')
+}
+
+function Test-ServiceStateStopped {
+    param([string]$State)
+
+    return ([string]$State -match '(?i)stopped|stop|parado')
+}
+
+function Find-GameSessionStop {
+    param(
+        $Start,
+        [object[]]$Stops,
+        [hashtable]$UsedStops
+    )
+
+    return @(
+        $Stops |
+            Where-Object { -not $UsedStops.ContainsKey([string]$_.Index) -and (Test-GameSessionPointMatch -Start $Start -Stop $_) } |
+            Sort-Object Time |
+            Select-Object -First 1
+    ) | Select-Object -First 1
+}
+
+function Find-ExistingOpenGameSession {
+    param(
+        [string]$Role,
+        [Nullable[int]]$ProcessId,
+        [string]$ProcessName,
+        [string]$Path
+    )
+
+    foreach ($session in @($script:GameSessions)) {
+        if ($session.Role -ne $Role) { continue }
+        if ($session.Ended) { continue }
+
+        if ($ProcessId -and $session.ProcessId -and $ProcessId -eq $session.ProcessId) { return $session }
+        if ($Path -and $session.Path -and $Path -ieq $session.Path) { return $session }
+        if ($ProcessName -and $session.ProcessName -and $ProcessName -ieq $session.ProcessName) { return $session }
+    }
+
+    return $null
+}
+
+function Get-GameSessionLines {
+    $lines = New-Object System.Collections.Generic.List[string]
+    $window = Get-GameSessionWindow
+    $lines.Add("TraceUSB SCUM/BattlEye session activity")
+    $lines.Add("Generated: $(Get-Date)")
+    $lines.Add("GameSessionDate: $($window.Start.ToString('yyyy-MM-dd'))")
+    $lines.Add("Window: $($window.Start) to $($window.End)")
+    $lines.Add("Purpose: reconstruct game/anti-cheat activity windows for correlation. This is context, not proof of cheating.")
+    $lines.Add("")
+
+    if ($DisableGameSessionAnalysis) {
+        $lines.Add("Game session analysis disabled by -DisableGameSessionAnalysis.")
+        return @($lines)
+    }
+
+    if ($script:GameSessions.Count -eq 0) {
+        $lines.Add("No SCUM/BattlEye process or service sessions were reconstructed for the selected day.")
+        $lines.Add("Possible reasons: game was not run, Security 4688/4689 auditing was unavailable, service lifecycle events were absent, or relevant logs rolled over.")
+        return @($lines)
+    }
+
+    $sessionNumber = 1
+    foreach ($session in @($script:GameSessions | Sort-Object Started, ObservedUntil, Ended)) {
+        $lines.Add("Session: $sessionNumber")
+        $lines.Add("Role: $($session.Role)")
+        $lines.Add("Status: $($session.Status)")
+        $lines.Add("Started: $(if ($session.Started) { $session.Started } else { 'Unknown' })")
+        $lines.Add("Ended: $(if ($session.Ended) { $session.Ended } else { 'Unknown' })")
+        if ($session.ObservedUntil) { $lines.Add("ObservedUntil: $($session.ObservedUntil)") }
+        $lines.Add("Duration: $(Format-TraceDuration -Duration $session.Duration)")
+        if ($session.ProcessName) { $lines.Add("Process: $($session.ProcessName)") }
+        if ($session.ProcessId) { $lines.Add("PID: $($session.ProcessId)") }
+        if ($session.ServiceName) { $lines.Add("Service: $($session.ServiceName)") }
+        if ($session.Path) { $lines.Add("Path: $($session.Path)") }
+        $lines.Add("StartSource: $(if ($session.StartSource) { $session.StartSource } else { 'Unknown' })")
+        $lines.Add("EndSource: $(if ($session.EndSource) { $session.EndSource } else { 'Unknown' })")
+        $lines.Add("Quality: $($session.Quality)")
+        foreach ($note in @($session.Notes)) {
+            $lines.Add("Note: $note")
+        }
+        $lines.Add("")
+        $sessionNumber++
+    }
+
+    return @($lines)
+}
+
+function Collect-GameSessionActivity {
+    Write-Section "SCUM / BATTLEYE SESSION ACTIVITY"
+
+    if ($DisableGameSessionAnalysis) {
+        $script:Report.Add("Game session analysis disabled.")
+        $script:Report.Add("")
+        $script:GameSessionLines.Clear()
+        foreach ($line in Get-GameSessionLines) {
+            $script:GameSessionLines.Add($line)
+        }
+        return
+    }
+
+    $window = Get-GameSessionWindow
+    $script:Report.Add("Game session date: $($window.Start.ToString('yyyy-MM-dd'))")
+    $script:Report.Add("Window: $($window.Start) to $($window.End)")
+    $script:Report.Add("")
+
+    $starts = New-Object System.Collections.ArrayList
+    $stops = New-Object System.Collections.ArrayList
+    $pointIndex = 0
+    $terminationEventsAvailable = $false
+
+    try {
+        $events4688 = Get-WinEvent -FilterHashtable @{
+            LogName   = "Security"
+            Id        = 4688
+            StartTime = $window.Start
+            EndTime   = $window.End
+        } -ErrorAction Stop
+
+        foreach ($event in @($events4688 | Sort-Object TimeCreated)) {
+            $data = Get-ProcessCreationData $event
+            $role = Get-GameProcessRole -ExeName $data.ExeName -Path $data.Path
+            if (-not $role) { continue }
+
+            $starts.Add((New-GameSessionPoint -Index $pointIndex -Time $event.TimeCreated -Role $role -ProcessName $data.ExeName -ProcessId $data.ProcessId -Path $data.Path -Source "Security 4688" -EventId 4688)) | Out-Null
+            $pointIndex++
+        }
+    }
+    catch {
+        $script:Report.Add("Could not read Security 4688 for game session analysis: $($_.Exception.Message)")
+        $script:Report.Add("")
+    }
+
+    try {
+        $events4689 = Get-WinEvent -FilterHashtable @{
+            LogName   = "Security"
+            Id        = 4689
+            StartTime = $window.Start
+            EndTime   = $window.End
+        } -ErrorAction Stop
+
+        foreach ($event in @($events4689 | Sort-Object TimeCreated)) {
+            $data = Get-ProcessTerminationData $event
+            $role = Get-GameProcessRole -ExeName $data.ExeName -Path $data.Path
+            if (-not $role) { continue }
+
+            $terminationEventsAvailable = $true
+            $stops.Add((New-GameSessionPoint -Index $pointIndex -Time $event.TimeCreated -Role $role -ProcessName $data.ExeName -ProcessId $data.ProcessId -Path $data.Path -Source "Security 4689" -EventId 4689)) | Out-Null
+            $pointIndex++
+        }
+    }
+    catch {
+        $script:Report.Add("Could not read Security 4689 process termination events. Close time may be unavailable unless process termination auditing was enabled.")
+        $script:Report.Add("")
+    }
+
+    try {
+        $serviceEvents = Get-WinEvent -FilterHashtable @{
+            LogName   = "System"
+            Id        = 7036
+            StartTime = $window.Start
+            EndTime   = $window.End
+        } -ErrorAction SilentlyContinue
+
+        foreach ($event in @($serviceEvents | Sort-Object TimeCreated)) {
+            $data = Get-ServiceStateData $event
+            $role = Get-GameProcessRole -ServiceName $data.ServiceName
+            if (-not $role) { continue }
+
+            if (Test-ServiceStateRunning -State $data.State) {
+                $starts.Add((New-GameSessionPoint -Index $pointIndex -Time $event.TimeCreated -Role $role -ServiceName $data.ServiceName -Source "System 7036" -EventId 7036)) | Out-Null
+                $pointIndex++
+            }
+            elseif (Test-ServiceStateStopped -State $data.State) {
+                $stops.Add((New-GameSessionPoint -Index $pointIndex -Time $event.TimeCreated -Role $role -ServiceName $data.ServiceName -Source "System 7036" -EventId 7036)) | Out-Null
+                $pointIndex++
+            }
+        }
+    }
+    catch {
+        Write-RunLog "Game session service lifecycle collection failed: $($_.Exception.Message)"
+    }
+
+    $usedStops = @{}
+    foreach ($start in @($starts | Sort-Object Time)) {
+        $stop = Find-GameSessionStop -Start $start -Stops @($stops) -UsedStops $usedStops
+        if ($stop) {
+            $usedStops[[string]$stop.Index] = $true
+            Add-GameSessionRecord `
+                -Role $start.Role `
+                -Status "Closed" `
+                -Started $start.Time `
+                -Ended $stop.Time `
+                -ProcessName $start.ProcessName `
+                -ProcessId $start.ProcessId `
+                -Path $start.Path `
+                -ServiceName $start.ServiceName `
+                -StartSource $start.Source `
+                -EndSource $stop.Source `
+                -Quality "Exact start/end from Windows event logs" `
+                -Notes @()
+        }
+        else {
+            $note = if ($terminationEventsAvailable) {
+                "No matching termination/stop event was found for this start event."
+            }
+            else {
+                "Close time unavailable because matching Security 4689/service stop evidence was not present."
+            }
+
+            Add-GameSessionRecord `
+                -Role $start.Role `
+                -Status "Start observed, close time unavailable" `
+                -Started $start.Time `
+                -ProcessName $start.ProcessName `
+                -ProcessId $start.ProcessId `
+                -Path $start.Path `
+                -ServiceName $start.ServiceName `
+                -StartSource $start.Source `
+                -Quality "Start observed only" `
+                -Notes @($note)
+        }
+    }
+
+    foreach ($stop in @($stops | Where-Object { -not $usedStops.ContainsKey([string]$_.Index) } | Sort-Object Time)) {
+        Add-GameSessionRecord `
+            -Role $stop.Role `
+            -Status "Close observed, start time unavailable" `
+            -Ended $stop.Time `
+            -ProcessName $stop.ProcessName `
+            -ProcessId $stop.ProcessId `
+            -Path $stop.Path `
+            -ServiceName $stop.ServiceName `
+            -EndSource $stop.Source `
+            -Quality "End observed only" `
+            -Notes @("A close/stop event was seen without a matching start event in the selected day/window.")
+    }
+
+    $now = Get-Date
+    try {
+        foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+            $processName = if ($process.ProcessName) { "$($process.ProcessName).exe" } else { $null }
+            $path = Get-ProcessPathSafe -Process $process
+            $role = Get-GameProcessRole -ExeName $processName -Path $path
+            if (-not $role) { continue }
+
+            $pid = $null
+            try { if ($process.Id) { $pid = [int]$process.Id } } catch {}
+            $startTime = Get-ProcessStartTimeSafe -Process $process
+            if ($startTime -and ($startTime -lt $window.Start -or $startTime -ge $window.End)) { continue }
+
+            $existing = Find-ExistingOpenGameSession -Role $role -ProcessId $pid -ProcessName $processName -Path $path
+            if ($existing) {
+                $existing.Status = "Running at collection time"
+                $existing.ObservedUntil = $now
+                $existing.Quality = "Start observed and process still active"
+                $existing.Notes += "Process was still running when TraceUSB collected live process data."
+                continue
+            }
+
+            Add-GameSessionRecord `
+                -Role $role `
+                -Status "Running at collection time" `
+                -Started $startTime `
+                -ObservedUntil $now `
+                -ProcessName $processName `
+                -ProcessId $pid `
+                -Path $path `
+                -StartSource "Live process snapshot" `
+                -Quality "Live process snapshot" `
+                -Notes @("Process was still running when TraceUSB collected live process data.")
+        }
+    }
+    catch {
+        Write-RunLog "Game session live process collection failed: $($_.Exception.Message)"
+    }
+
+    $script:GameSessionLines.Clear()
+    foreach ($line in Get-GameSessionLines) {
+        $script:GameSessionLines.Add($line)
+    }
+
+    if ($script:GameSessions.Count -eq 0) {
+        $script:Report.Add("No SCUM/BattlEye process or service sessions were reconstructed for the selected day.")
+        $script:Report.Add("")
+        return
+    }
+
+    foreach ($session in @($script:GameSessions | Sort-Object Started, ObservedUntil, Ended)) {
+        $script:Report.Add("$($session.Role) | $($session.Status)")
+        $script:Report.Add("Started: $(if ($session.Started) { $session.Started } else { 'Unknown' })")
+        $script:Report.Add("Ended: $(if ($session.Ended) { $session.Ended } else { 'Unknown' })")
+        if ($session.ObservedUntil) { $script:Report.Add("ObservedUntil: $($session.ObservedUntil)") }
+        $script:Report.Add("Duration: $(Format-TraceDuration -Duration $session.Duration)")
+        if ($session.ProcessName) { $script:Report.Add("Process: $($session.ProcessName)") }
+        if ($session.ProcessId) { $script:Report.Add("PID: $($session.ProcessId)") }
+        if ($session.ServiceName) { $script:Report.Add("Service: $($session.ServiceName)") }
+        if ($session.Path) { $script:Report.Add("Path: $($session.Path)") }
+        $script:Report.Add("Quality: $($session.Quality)")
         $script:Report.Add("")
     }
 }
@@ -1469,6 +2095,114 @@ function Get-OverlayScreenshotRoots {
     return @($roots | Select-Object -Unique)
 }
 
+function Ensure-WindowApi {
+    if ("TraceUsbWindowApi" -as [type]) { return }
+
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class TraceUsbWindowApi
+{
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
+}
+"@
+}
+
+function Test-ProcessMatchesGamePattern {
+    param($Process)
+
+    if (-not $Process -or -not $Process.ProcessName) { return $false }
+
+    $candidateNames = @(
+        [string]$Process.ProcessName,
+        "$($Process.ProcessName).exe"
+    )
+
+    foreach ($candidate in $candidateNames) {
+        if (Test-NameMatchesAny -Name $candidate -Patterns $GameProcessPatterns) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-ScreenshotTargetProcess {
+    $candidates = New-Object System.Collections.Generic.List[object]
+
+    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+        if (-not (Test-ProcessMatchesGamePattern -Process $process)) { continue }
+        if (-not $process.MainWindowHandle -or $process.MainWindowHandle -eq [IntPtr]::Zero) { continue }
+
+        $rank = 50
+        if ($process.ProcessName -match '^SCUM$') { $rank = 0 }
+        elseif ($process.ProcessName -match 'SCUM.*Shipping') { $rank = 5 }
+        elseif ($process.ProcessName -match 'SCUM_Launcher') { $rank = 30 }
+        elseif ($process.ProcessName -match 'BEService') { $rank = 90 }
+
+        $candidates.Add([PSCustomObject]@{
+            Process = $process
+            Rank    = $rank
+            Title   = [string]$process.MainWindowTitle
+        }) | Out-Null
+    }
+
+    return @($candidates | Sort-Object Rank, Title | Select-Object -First 1)
+}
+
+function Set-ScreenshotTargetWindowFocus {
+    if ($DisableScreenshotWindowFocus) {
+        $script:Report.Add("Automatic SCUM window focus is disabled by parameter.")
+        Write-RunLog "Screenshot window focus disabled by parameter."
+        return $false
+    }
+
+    $target = Get-ScreenshotTargetProcess
+    if (-not $target) {
+        $script:Report.Add("Automatic SCUM window focus failed: no SCUM/BattlEye process with a visible window was found.")
+        Write-RunLog "Screenshot window focus failed: no visible game window found."
+        return $false
+    }
+
+    try {
+        Ensure-WindowApi
+        $handle = [IntPtr]$target.Process.MainWindowHandle
+        if ([TraceUsbWindowApi]::IsIconic($handle)) {
+            [TraceUsbWindowApi]::ShowWindowAsync($handle, 9) | Out-Null
+        }
+        else {
+            [TraceUsbWindowApi]::ShowWindowAsync($handle, 5) | Out-Null
+        }
+
+        Start-Sleep -Milliseconds 300
+        $focused = [TraceUsbWindowApi]::SetForegroundWindow($handle)
+        $details = "Target=$($target.Process.ProcessName).exe PID=$($target.Process.Id) Title=$($target.Title)"
+
+        if ($focused) {
+            $script:Report.Add("Focused SCUM window before overlay screenshot trigger. $details")
+            Write-RunLog "Focused screenshot target window. $details"
+            return $true
+        }
+
+        $script:Report.Add("Attempted to focus SCUM window before overlay screenshot trigger, but Windows did not confirm foreground focus. $details")
+        Write-RunLog "Screenshot target focus attempted but not confirmed. $details"
+        return $false
+    }
+    catch {
+        $script:Report.Add("Automatic SCUM window focus failed: $($_.Exception.Message)")
+        Write-RunLog "Screenshot window focus failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Get-ImageContentType {
     param([string]$Path)
 
@@ -1517,7 +2251,7 @@ function Invoke-ScreenshotTrigger {
     if (-not $EnableScreenshotTrigger) { return }
 
     Write-Section "SCREENSHOT TRIGGER"
-    $script:Report.Add("Screenshot trigger explicitly enabled. Return focus to the game before the countdown finishes.")
+    $script:Report.Add("Screenshot trigger explicitly enabled.")
     $script:Report.Add("No desktop screenshot fallback is used; TraceUSB only attaches an overlay-generated file when one is found.")
     $script:Report.Add("")
 
@@ -1559,14 +2293,21 @@ function Invoke-ScreenshotTrigger {
 
     try {
         Add-Type -AssemblyName System.Windows.Forms
-        Start-Sleep -Seconds 15
+        $focusSucceeded = Set-ScreenshotTargetWindowFocus
+        if ($focusSucceeded) {
+            Start-Sleep -Seconds $ScreenshotFocusWaitSeconds
+        }
+        else {
+            $script:Report.Add("Return focus to the SCUM game window manually before the fallback countdown finishes.")
+            Start-Sleep -Seconds 15
+        }
 
         $triggerTime = Get-Date
         [System.Windows.Forms.SendKeys]::SendWait([string]$target.Hotkey)
         $script:Report.Add("$($target.Source) screenshot hotkey sent: $($target.Label).")
         Write-RunLog "$($target.Source) screenshot hotkey sent: $($target.Label)."
 
-        Start-Sleep -Seconds 8
+        Start-Sleep -Seconds $ScreenshotPostTriggerWaitSeconds
         $captured = Find-NewOverlayScreenshot -Since $triggerTime -Roots $roots
 
         if ($captured) {
@@ -1987,14 +2728,14 @@ function Add-DiscordAttachment {
 
     if (-not $attachmentBytes) {
         $content = ($Lines -join "`r`n")
-        $attachmentBytes = [Text.Encoding]::UTF8.GetBytes($content)
+        $attachmentBytes = Convert-TextToUtf8Bytes -Text $content -Bom:(Test-DiscordAttachmentNeedsBom -ContentType $ContentType)
     }
 
     if ($attachmentBytes.Length -gt $DiscordMaxAttachmentBytes -and -not $Bytes) {
         $keepBytes = [Math]::Max(1024, $DiscordMaxAttachmentBytes - 2048)
         $content = [Text.Encoding]::UTF8.GetString($attachmentBytes, 0, $keepBytes)
         $content += "`r`n`r`n[TraceUSB truncated this attachment from $($attachmentBytes.Length) bytes to fit DiscordMaxAttachmentBytes=$DiscordMaxAttachmentBytes.]"
-        $attachmentBytes = [Text.Encoding]::UTF8.GetBytes($content)
+        $attachmentBytes = Convert-TextToUtf8Bytes -Text $content -Bom:(Test-DiscordAttachmentNeedsBom -ContentType $ContentType)
         Write-RunLog "Attachment truncated: $FileName ($($attachmentBytes.Length) bytes after truncation)."
     }
     elseif ($attachmentBytes.Length -gt $DiscordMaxAttachmentBytes) {
@@ -2010,12 +2751,7 @@ function Add-DiscordAttachment {
     }) | Out-Null
 
     if ($SaveDiscordAttachmentsLocal -and $LocalPath) {
-        if ($Bytes) {
-            [System.IO.File]::WriteAllBytes($LocalPath, $attachmentBytes)
-        }
-        else {
-            Set-Content -LiteralPath $LocalPath -Value $content -Encoding UTF8
-        }
+        [System.IO.File]::WriteAllBytes($LocalPath, $attachmentBytes)
     }
 }
 
@@ -3540,6 +4276,10 @@ function Build-DiscordArtifacts {
     Add-DiscordAttachment -FileName $script:EvidenceFileName -Lines $evidenceLines -ContentType "application/x-ndjson; charset=utf-8" -LocalPath $script:EvidencePath
     Add-DiscordAttachment -FileName $script:TranslationsFileName -Lines $translationLines -ContentType "text/plain; charset=utf-8" -LocalPath $script:TranslationsPath
 
+    if ($script:GameSessionLines.Count -gt 0) {
+        Add-DiscordAttachment -FileName $script:GameSessionsFileName -Lines @($script:GameSessionLines) -ContentType "text/plain; charset=utf-8" -LocalPath $script:GameSessionsPath
+    }
+
     if ($EnableBrowserHistoryScan) {
         Add-DiscordAttachment -FileName $script:FilteredHistoryFileName -Lines $historyLines -ContentType "text/plain; charset=utf-8" -LocalPath $script:FilteredHistoryPath
     }
@@ -3672,6 +4412,9 @@ function Write-Outputs {
             }
     )
     Set-Content -LiteralPath $script:TimelinePath -Value $timelineLines -Encoding UTF8
+    if ($script:GameSessionLines.Count -gt 0) {
+        Set-Content -LiteralPath $script:GameSessionsPath -Value $script:GameSessionLines -Encoding UTF8
+    }
     if ($script:NetworkSnapshot.Count -gt 0) {
         Set-Content -LiteralPath $script:NetworkSnapshotPath -Value $script:NetworkSnapshot -Encoding UTF8
         Add-DiscordAttachment -FileName $script:NetworkSnapshotFileName -Lines $script:NetworkSnapshot -ContentType "text/plain; charset=utf-8"
@@ -3700,6 +4443,7 @@ function Write-Outputs {
     $script:Report.Add("Discord status: $script:DiscordStatus")
     $script:Report.Add("Discord attachments prepared: $script:DiscordAttachmentCount")
     $script:Report.Add("Run log: $script:RunLogPath")
+    if ([System.IO.File]::Exists($script:GameSessionsPath)) { $script:Report.Add("Game sessions: $script:GameSessionsPath") }
     if ([System.IO.File]::Exists($script:NetworkSnapshotPath)) { $script:Report.Add("Network snapshot: $script:NetworkSnapshotPath") }
     if ([System.IO.File]::Exists($script:SystemContextPath)) { $script:Report.Add("System context: $script:SystemContextPath") }
     if ([System.IO.File]::Exists($script:IntegrityHashesPath)) { $script:Report.Add("Integrity hashes: $script:IntegrityHashesPath") }
@@ -3719,13 +4463,14 @@ function Enable-ProcessAuditPolicy {
     ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
     if (-not $isAdmin) {
-        Add-Evidence -Time (Get-Date) -Category "Operational" -Source "AuditPolicy" -Confidence 20 -Reasons @("Audit policy requested without administrator rights") -Details "Could not enable Process Creation auditing" | Out-Null
+        Add-Evidence -Time (Get-Date) -Category "Operational" -Source "AuditPolicy" -Confidence 20 -Reasons @("Audit policy requested without administrator rights") -Details "Could not enable Process Creation/Termination auditing" | Out-Null
         return
     }
 
     try {
         auditpol /set /subcategory:"Process Creation" /success:enable /failure:enable | Out-Null
-        Add-Evidence -Time (Get-Date) -Category "Operational" -Source "AuditPolicy" -Confidence 20 -Reasons @("Operator enabled Process Creation auditing") -Details "Process Creation auditing enabled" | Out-Null
+        auditpol /set /subcategory:"Process Termination" /success:enable /failure:disable | Out-Null
+        Add-Evidence -Time (Get-Date) -Category "Operational" -Source "AuditPolicy" -Confidence 20 -Reasons @("Operator enabled Process Creation/Termination auditing") -Details "Process Creation and Process Termination auditing enabled" | Out-Null
     }
     catch {
         Add-Evidence -Time (Get-Date) -Category "Operational" -Source "AuditPolicy" -Confidence 20 -Reasons @("Audit policy change failed") -Details $_.Exception.Message | Out-Null
@@ -3809,6 +4554,7 @@ Collect-ProcessEvents
 Collect-PrefetchEvents
 Collect-BamEvents
 Collect-ServiceEvents
+Collect-GameSessionActivity
 Collect-RuntimeContext
 Collect-NetworkAnomalies
 Complete-Correlation

@@ -40,8 +40,8 @@ TraceUSB still:
 
 Two sensitive actions are opt-in only:
 
-* `-EnableAuditPolicy` enables Process Creation auditing with `auditpol`
-* `-EnableScreenshotTrigger` sends native NVIDIA/AMD screenshot hotkeys when runtime context is present
+* `-EnableAuditPolicy` enables Process Creation and Process Termination auditing with `auditpol`
+* `-EnableScreenshotTrigger` focuses the SCUM window when possible and sends native NVIDIA/AMD screenshot hotkeys when runtime context is present
 
 ---
 
@@ -52,6 +52,7 @@ TraceUSB writes timestamped local files:
 ```text
 Desktop\analise_yyyyMMdd_HHmmss.txt
 Desktop\timeline_yyyyMMdd_HHmmss.txt
+Desktop\game_sessions_yyyyMMdd_HHmmss.txt
 Desktop\traceusb_run_yyyyMMdd_HHmmss.log
 Desktop\network_snapshot_yyyyMMdd_HHmmss.txt
 Desktop\system_context_yyyyMMdd_HHmmss.txt
@@ -61,6 +62,9 @@ Desktop\TraceUSB_case_yyyyMMdd_HHmmss.zip
 
 `analise.txt` is operator-readable.  
 `timeline.txt` is chronological.  
+`game_sessions.txt` reconstructs SCUM/BattlEye process and service activity
+for the selected day, including start, close, observed duration, and evidence
+quality when available.
 `traceusb_run.log` records operational status, including Discord delivery
 success/failure and timeout details.
 `network_snapshot.txt` records network metadata for fake-lag/VPN/proxy review.
@@ -75,6 +79,7 @@ Discord download attachments instead of saving them locally by default:
 ```text
 analise_yyyyMMdd_HHmmss.txt
 timeline_yyyyMMdd_HHmmss.txt
+game_sessions_yyyyMMdd_HHmmss.txt
 evidence_yyyyMMdd_HHmmss.jsonl
 translations_yyyyMMdd_HHmmss.txt
 filtered_history_yyyyMMdd_HHmmss.txt
@@ -86,7 +91,7 @@ TraceUSB_case_yyyyMMdd_HHmmss.zip
 overlay_screenshot_yyyyMMdd_HHmmss.png
 ```
 
-`analise_*.txt`, `timeline_*.txt`, `network_snapshot_*.txt`,
+`analise_*.txt`, `timeline_*.txt`, `game_sessions_*.txt`, `network_snapshot_*.txt`,
 `system_context_*.txt`, `traceusb_run_*.log`, `integrity_hashes_*.txt`, and the
 case ZIP are written locally and are also attached to Discord when available.
 `overlay_screenshot_*.png/.jpg` is attached only when
@@ -131,6 +136,7 @@ Run an internal review with the configured Discord relay or local webhook:
 By default this internal build:
 
 * writes timestamped `analise_*.txt` and `timeline_*.txt` locally;
+* writes `game_sessions_*.txt` with SCUM/BattlEye start/close/duration context;
 * writes `traceusb_run_*.log` locally so network or webhook failures are visible;
 * writes `network_snapshot_*.txt`, `system_context_*.txt`, and a hashed case ZIP;
 * sends a Discord embed when a relay or webhook endpoint is configured;
@@ -184,7 +190,9 @@ Opt in to GPU screenshot hotkeys:
 
 This sends the detected NVIDIA/AMD overlay hotkey, searches known overlay
 screenshot folders for a new image, and attaches that image to Discord/case
-outputs when found. TraceUSB does not take a desktop screenshot fallback.
+outputs when found. TraceUSB first tries to bring the SCUM game window to the
+foreground, so the operator normally does not need to alt-tab manually. TraceUSB
+does not take a desktop screenshot fallback.
 
 Create a Discord embed preview without sending anything:
 
@@ -283,10 +291,14 @@ Customize game/session anchors:
 | Parameter | Default | Purpose |
 |---|---:|---|
 | `-LookbackHours` | `24` | Event and artifact lookback window |
+| `-GameSessionDate` | Today | Full local day used for SCUM/BattlEye session reconstruction |
 | `-OutputDirectory` | Desktop | Output folder |
 | `-NoOpen` | Off | Prevents Notepad from opening outputs |
-| `-EnableAuditPolicy` | Off | Enables Process Creation auditing when running as admin |
-| `-EnableScreenshotTrigger` | Off | Sends native GPU screenshot hotkeys when runtime context exists |
+| `-EnableAuditPolicy` | Off | Enables Process Creation and Process Termination auditing when running as admin |
+| `-EnableScreenshotTrigger` | Off | Focuses SCUM when possible, sends native GPU screenshot hotkeys, and attaches a detected overlay image |
+| `-DisableScreenshotWindowFocus` | Off | Keeps the old manual-focus behavior before sending the screenshot hotkey |
+| `-ScreenshotFocusWaitSeconds` | `3` | Wait after automatic SCUM focus before sending the overlay hotkey |
+| `-ScreenshotPostTriggerWaitSeconds` | `8` | Wait after hotkey before scanning for a new screenshot file |
 | `-IncludeLowConfidence` | Off | Includes low/context evidence in the readable report |
 | `-EnableDiscordWebhook` | On | Sends a Discord embed when a relay or webhook endpoint is configured |
 | `-DisableDiscordWebhook` | Off | Disables Discord posting for dry runs |
@@ -323,6 +335,7 @@ Customize game/session anchors:
 | `-BrowserHistoryMaxHits` | `100` | Maximum filtered history hits |
 | `-EnableNetworkAnomalyScan` | On | Collects network metadata and indicators relevant to fake-lag review |
 | `-DisableNetworkAnomalyScan` | Off | Disables network metadata collection |
+| `-DisableGameSessionAnalysis` | Off | Disables SCUM/BattlEye session reconstruction |
 | `-EnableCaseBundle` | On | Creates a timestamped ZIP with run artifacts and SHA256 hashes |
 | `-DisableCaseBundle` | Off | Disables local case bundle ZIP creation |
 | `-SQLiteCliPath` | Auto-detect | Optional path to `sqlite3.exe` |
@@ -411,6 +424,57 @@ The client sends the same Discord-compatible JSON or multipart payload to the
 relay. The relay forwards it to Discord. This is materially safer than
 obfuscating or encrypting a webhook inside open-source client code, because the
 client never receives the real Discord URL.
+
+---
+
+## Overlay Screenshot Trigger
+
+`-EnableScreenshotTrigger` is designed for consent-based review when the game is
+running. TraceUSB searches for a visible process window matching the configured
+SCUM/BattlEye process patterns, prioritizes `SCUM.exe`, brings that window to
+the foreground when Windows allows it, then sends the detected GPU overlay
+screenshot hotkey.
+
+This path intentionally favors NVIDIA/AMD overlay screenshots because those
+capture paths can include game-layer visuals that ordinary desktop sharing or
+desktop screenshots may miss. If the player has disabled NVIDIA/AMD overlay
+screenshot support, TraceUSB records that no overlay screenshot was detected
+instead of silently substituting a lower-value desktop capture.
+
+AMD support uses the default Radeon screenshot hotkey and the common Radeon
+ReLive screenshot folder. Because AMD overlay configuration varies more between
+driver versions, verify it with a collaborator before relying on it operationally.
+
+---
+
+## SCUM / BattlEye Session Activity
+
+TraceUSB reconstructs game and anti-cheat activity for `-GameSessionDate`
+using a full local-day window. The default is the current date on the reviewed
+computer. The output is written to `game_sessions_*.txt`, added to
+`timeline_*.txt`, represented in `evidence_*.jsonl`, and attached to Discord.
+
+Sources used:
+
+* Security `4688` process creation for `SCUM.exe`, `SCUM-Win64-Shipping.exe`,
+  `SCUM_Launcher.exe`, `BEService.exe`, and `BEService_x64.exe`;
+* Security `4689` process termination when process termination auditing was
+  already enabled;
+* System `7036` service running/stopped transitions for BattlEye service names;
+* live process snapshot when SCUM/BattlEye is still running during collection.
+
+The report labels each reconstructed session with its evidence quality:
+
+* `Exact start/end from Windows event logs`;
+* `Start observed only`;
+* `End observed only`;
+* `Start observed and process still active`;
+* `Live process snapshot`.
+
+Close time is only exact when Windows recorded a matching termination or service
+stop event. If Security `4689` was not enabled before the game was closed,
+TraceUSB records `close time unavailable` instead of estimating a false
+duration.
 
 ---
 
