@@ -84,6 +84,33 @@ Describe "TraceUSB forensic analyzer" {
         $scriptText | Should Match 'DisablePortableSQLiteDownload'
     }
 
+    It "does not write local report artifacts by default" {
+        $outputDir = Join-Path $TestDrive "memory-only-out"
+
+        Mock Get-WinEvent { return @() }
+        Mock Get-PnpDevice { return @() }
+        Mock Get-PnpDeviceProperty { return @() }
+        Mock Get-CimInstance { return @() }
+        Mock Get-Process { return @() }
+        Mock Get-ChildItem { return @() }
+        Mock Get-ItemProperty { return $null }
+        Mock Start-Process { throw "Start-Process should not run without SaveLocalArtifacts" }
+
+        & $scriptPath `
+            -OutputDirectory $outputDir `
+            -DisableDiscordWebhook `
+            -DisableBrowserHistoryScan `
+            -DisableNetworkAnomalyScan `
+            -DisableCaseBundle
+
+        if (Test-Path -LiteralPath $outputDir) {
+            [System.IO.Directory]::GetFiles($outputDir).Count | Should Be 0
+        }
+        else {
+            (Test-Path -LiteralPath $outputDir) | Should Be $false
+        }
+    }
+
     It "reconstructs SCUM and BattlEye start, close, and duration context" {
         $sessionDate = [datetime]"2026-07-01"
         $gameStart = $sessionDate.AddHours(14).AddMinutes(12)
@@ -145,6 +172,7 @@ Describe "TraceUSB forensic analyzer" {
         & $scriptPath `
             -OutputDirectory $outputDir `
             -NoOpen `
+            -SaveLocalArtifacts `
             -GameSessionDate $sessionDate `
             -DisableDiscordWebhook `
             -DisableBrowserHistoryScan `
@@ -278,7 +306,7 @@ Describe "TraceUSB forensic analyzer" {
         Mock Invoke-RestMethod { throw "Invoke-RestMethod should not run unless -EnableDiscordWebhook is set" }
 
         $previewPath = Join-Path $outputDir "discord_preview.html"
-        & $scriptPath -OutputDirectory $outputDir -NoOpen -LookbackHours 24 -DiscordPreviewPath $previewPath -DisableDiscordWebhook -DisableBrowserHistoryScan -DisableNetworkAnomalyScan -DisableCaseBundle
+        & $scriptPath -OutputDirectory $outputDir -NoOpen -SaveLocalArtifacts -LookbackHours 24 -DiscordPreviewPath $previewPath -DisableDiscordWebhook -DisableBrowserHistoryScan -DisableNetworkAnomalyScan -DisableCaseBundle
 
         [System.IO.Directory]::GetFiles($outputDir, "analise_*.txt").Count | Should Be 1
         [System.IO.Directory]::GetFiles($outputDir, "timeline_*.txt").Count | Should Be 1

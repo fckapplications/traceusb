@@ -9,9 +9,13 @@ param(
 
     [switch]$NoOpen,
 
+    [switch]$SaveLocalArtifacts,
+
     [switch]$EnableAuditPolicy,
 
     [switch]$EnableScreenshotTrigger,
+
+    [switch]$KeepTriggeredOverlayScreenshot,
 
     [switch]$DisableScreenshotWindowFocus,
 
@@ -225,6 +229,7 @@ $script:DiscordAttachments = New-Object System.Collections.ArrayList
 $script:RunLog = New-Object System.Collections.Generic.List[string]
 $script:DiscordStatus = if ($EnableDiscordWebhook) { "not_attempted" } else { "disabled" }
 $script:DiscordAttachmentCount = 0
+$script:DiscordLastError = $null
 $script:ScreenshotCapturePath = $null
 $script:ScreenshotCaptureFileName = $null
 $script:ScreenshotCaptureContentType = $null
@@ -287,6 +292,7 @@ function Write-RunLog {
 }
 
 function Write-RunLogFile {
+    if (-not $SaveLocalArtifacts -and -not $DiscordDebug) { return }
     Ensure-OutputDirectory
     Set-Content -LiteralPath $script:RunLogPath -Value $script:RunLog -Encoding UTF8
 }
@@ -294,21 +300,23 @@ function Write-RunLogFile {
 function Write-ConsoleSummary {
     Write-Host ""
     Write-Host "TraceUSB concluido."
-    if ([System.IO.File]::Exists($script:ReportPath)) {
+    if ($SaveLocalArtifacts -and [System.IO.File]::Exists($script:ReportPath)) {
         Write-Host "Analise: $script:ReportPath"
     }
     else {
-        Write-Host "Analise: nao gerada neste modo"
+        Write-Host "Arquivos locais: nao salvos (envio somente via Discord)"
     }
-    if ([System.IO.File]::Exists($script:TimelinePath)) {
+    if ($SaveLocalArtifacts -and [System.IO.File]::Exists($script:TimelinePath)) {
         Write-Host "Timeline: $script:TimelinePath"
     }
-    else {
-        Write-Host "Timeline: nao gerada neste modo"
+    if ($SaveLocalArtifacts -and [System.IO.File]::Exists($script:RunLogPath)) {
+        Write-Host "Run log: $script:RunLogPath"
     }
-    Write-Host "Run log: $script:RunLogPath"
     Write-Host "Discord: $script:DiscordStatus"
-    if ([System.IO.File]::Exists($script:CaseBundlePath)) {
+    if ($script:DiscordLastError) {
+        Write-Host "Discord erro: $script:DiscordLastError"
+    }
+    if ($SaveLocalArtifacts -and [System.IO.File]::Exists($script:CaseBundlePath)) {
         Write-Host "Case bundle: $script:CaseBundlePath"
     }
 }
@@ -1653,12 +1661,12 @@ function Collect-GameSessionActivity {
             $role = Get-GameProcessRole -ExeName $processName -Path $path
             if (-not $role) { continue }
 
-            $pid = $null
-            try { if ($process.Id) { $pid = [int]$process.Id } } catch {}
+            $processIdValue = $null
+            try { if ($process.Id) { $processIdValue = [int]$process.Id } } catch {}
             $startTime = Get-ProcessStartTimeSafe -Process $process
             if ($startTime -and ($startTime -lt $window.Start -or $startTime -ge $window.End)) { continue }
 
-            $existing = Find-ExistingOpenGameSession -Role $role -ProcessId $pid -ProcessName $processName -Path $path
+            $existing = Find-ExistingOpenGameSession -Role $role -ProcessId $processIdValue -ProcessName $processName -Path $path
             if ($existing) {
                 $existing.Status = "Running at collection time"
                 $existing.ObservedUntil = $now
@@ -1673,7 +1681,7 @@ function Collect-GameSessionActivity {
                 -Started $startTime `
                 -ObservedUntil $now `
                 -ProcessName $processName `
-                -ProcessId $pid `
+                -ProcessId $processIdValue `
                 -Path $path `
                 -StartSource "Live process snapshot" `
                 -Quality "Live process snapshot" `
@@ -4205,6 +4213,7 @@ function Send-DiscordWebhook {
         }
         catch {
             $script:DiscordStatus = "failed"
+            $script:DiscordLastError = $_.Exception.Message
             $script:Report.Add("")
             $script:Report.Add("Discord delivery failed via $($target.Kind): $($_.Exception.Message)")
             Write-RunLog "Discord delivery failed via $($target.Kind): $($_.Exception.Message)"
@@ -4231,6 +4240,7 @@ function Send-DiscordWebhook {
 
             if ($sentFiles -gt 0) {
                 $script:DiscordStatus = "sent_partial_attachments_$($target.Kind)"
+                $script:DiscordLastError = $multipartError
                 $script:Report.Add("Discord delivery stopped after partial attachment delivery: $sentFiles file(s) sent.")
                 return
             }
@@ -4244,6 +4254,7 @@ function Send-DiscordWebhook {
             }
             catch {
                 $script:DiscordStatus = "failed"
+                $script:DiscordLastError = $_.Exception.Message
                 $script:Report.Add("Discord delivery fallback failed via $($target.Kind): $($_.Exception.Message)")
                 Write-RunLog "Discord fallback failed via $($target.Kind): $($_.Exception.Message)"
                 return
@@ -4289,6 +4300,16 @@ function Build-DiscordArtifacts {
             $screenshotBytes = [System.IO.File]::ReadAllBytes($script:ScreenshotCapturePath)
             Add-DiscordAttachment -FileName $script:ScreenshotCaptureFileName -Bytes $screenshotBytes -ContentType $script:ScreenshotCaptureContentType
             Write-RunLog "Overlay screenshot added to Discord attachments: $script:ScreenshotCaptureFileName ($($screenshotBytes.Length) bytes)."
+
+            if (-not $KeepTriggeredOverlayScreenshot) {
+                try {
+                    Remove-Item -LiteralPath $script:ScreenshotCapturePath -Force
+                    Write-RunLog "Triggered overlay screenshot removed after being queued in memory: $script:ScreenshotCapturePath"
+                }
+                catch {
+                    Write-RunLog "Could not remove triggered overlay screenshot $script:ScreenshotCapturePath`: $($_.Exception.Message)"
+                }
+            }
         }
         catch {
             Write-RunLog "Overlay screenshot attachment failed: $($_.Exception.Message)"
@@ -4333,28 +4354,50 @@ function Write-DiscordAttachmentToFile {
     return $path
 }
 
+function Convert-BytesToSha256Hex {
+    param([byte[]]$Bytes)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha.ComputeHash($Bytes)
+        return (($hashBytes | ForEach-Object { $_.ToString("x2") }) -join "").ToUpperInvariant()
+    }
+    finally {
+        if ($sha) { $sha.Dispose() }
+    }
+}
+
+function Add-ZipEntryBytes {
+    param(
+        $ZipArchive,
+        [string]$FileName,
+        [byte[]]$Bytes
+    )
+
+    if (-not $ZipArchive -or -not $FileName) { return }
+
+    $entry = $ZipArchive.CreateEntry((Get-SafeArtifactFileName $FileName), [System.IO.Compression.CompressionLevel]::Optimal)
+    $stream = $entry.Open()
+    try {
+        if ($Bytes -and $Bytes.Length -gt 0) {
+            $stream.Write($Bytes, 0, $Bytes.Length)
+        }
+    }
+    finally {
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
 function New-CaseBundle {
     if (-not $EnableCaseBundle) {
         Write-RunLog "Case bundle disabled."
         return
     }
 
-    Ensure-OutputDirectory
-    $caseTemp = Join-Path $script:OutputDirectory ("case_work_$($script:ArtifactSuffix)")
-    if (Test-Path -LiteralPath $caseTemp) {
-        Remove-Item -LiteralPath $caseTemp -Recurse -Force
-    }
-    New-Item -ItemType Directory -Path $caseTemp -Force | Out-Null
-
     try {
-        foreach ($attachment in $script:DiscordAttachments) {
-            Write-DiscordAttachmentToFile -Attachment $attachment -Directory $caseTemp | Out-Null
-        }
+        Add-Type -AssemblyName System.IO.Compression
 
-        if ([System.IO.File]::Exists($script:RunLogPath)) {
-            Copy-Item -LiteralPath $script:RunLogPath -Destination (Join-Path $caseTemp $script:RunLogFileName) -Force
-        }
-
+        $bundleAttachments = @($script:DiscordAttachments)
         $hashLines = New-Object System.Collections.Generic.List[string]
         $hashLines.Add("TraceUSB integrity hashes")
         $hashLines.Add("Generated: $(Get-Date)")
@@ -4362,27 +4405,43 @@ function New-CaseBundle {
         $hashLines.Add("HashAlgorithm: SHA256")
         $hashLines.Add("")
 
-        Get-ChildItem -LiteralPath $caseTemp -File |
-            Sort-Object Name |
-            ForEach-Object {
-                $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
-                $hashLines.Add("$($hash.Hash)  $($_.Name)")
-            }
-
-        $integrityPathInCase = Join-Path $caseTemp $script:IntegrityHashesFileName
-        Set-Content -LiteralPath $integrityPathInCase -Value $hashLines -Encoding UTF8
-        Set-Content -LiteralPath $script:IntegrityHashesPath -Value $hashLines -Encoding UTF8
-
-        if (Test-Path -LiteralPath $script:CaseBundlePath) {
-            Remove-Item -LiteralPath $script:CaseBundlePath -Force
+        foreach ($attachment in @($bundleAttachments | Sort-Object FileName)) {
+            if (-not $attachment -or -not $attachment.FileName) { continue }
+            $bytes = Get-DiscordAttachmentBytes -Attachment $attachment
+            $hash = Convert-BytesToSha256Hex -Bytes $bytes
+            $hashLines.Add("$hash  $($attachment.FileName)")
         }
-        Compress-Archive -Path (Join-Path $caseTemp "*") -DestinationPath $script:CaseBundlePath -Force
 
         Add-DiscordAttachment -FileName $script:IntegrityHashesFileName -Lines $hashLines -ContentType "text/plain; charset=utf-8"
-        if ([System.IO.File]::Exists($script:CaseBundlePath)) {
-            $zipBytes = [System.IO.File]::ReadAllBytes($script:CaseBundlePath)
-            Add-DiscordAttachment -FileName $script:CaseBundleFileName -Bytes $zipBytes -ContentType "application/zip"
-            Write-RunLog "Case bundle created: $script:CaseBundlePath ($($zipBytes.Length) bytes)."
+        $integrityAttachment = @($script:DiscordAttachments | Where-Object { $_.FileName -eq $script:IntegrityHashesFileName } | Select-Object -Last 1)
+
+        $memoryStream = New-Object System.IO.MemoryStream
+        $zip = New-Object System.IO.Compression.ZipArchive($memoryStream, [System.IO.Compression.ZipArchiveMode]::Create, $true)
+        try {
+            foreach ($attachment in @($bundleAttachments)) {
+                if (-not $attachment -or -not $attachment.FileName) { continue }
+                Add-ZipEntryBytes -ZipArchive $zip -FileName $attachment.FileName -Bytes (Get-DiscordAttachmentBytes -Attachment $attachment)
+            }
+            foreach ($attachment in @($integrityAttachment)) {
+                if (-not $attachment -or -not $attachment.FileName) { continue }
+                Add-ZipEntryBytes -ZipArchive $zip -FileName $attachment.FileName -Bytes (Get-DiscordAttachmentBytes -Attachment $attachment)
+            }
+        }
+        finally {
+            if ($zip) { $zip.Dispose() }
+        }
+
+        $zipBytes = $memoryStream.ToArray()
+        if ($memoryStream) { $memoryStream.Dispose() }
+
+        Add-DiscordAttachment -FileName $script:CaseBundleFileName -Bytes $zipBytes -ContentType "application/zip"
+        Write-RunLog "Case bundle created in memory: $script:CaseBundleFileName ($($zipBytes.Length) bytes)."
+
+        if ($SaveLocalArtifacts) {
+            Ensure-OutputDirectory
+            Set-Content -LiteralPath $script:IntegrityHashesPath -Value $hashLines -Encoding UTF8
+            [System.IO.File]::WriteAllBytes($script:CaseBundlePath, $zipBytes)
+            Write-RunLog "Case bundle also saved locally: $script:CaseBundlePath"
         }
     }
     catch {
@@ -4390,18 +4449,19 @@ function New-CaseBundle {
         $script:Report.Add("")
         $script:Report.Add("Case bundle creation failed: $($_.Exception.Message)")
     }
-    finally {
-        try { Remove-Item -LiteralPath $caseTemp -Recurse -Force } catch {}
-    }
 }
 
 function Write-Outputs {
-    Ensure-OutputDirectory
-    Write-RunLog "Writing outputs to $script:OutputDirectory."
+    if ($SaveLocalArtifacts) {
+        Ensure-OutputDirectory
+        Write-RunLog "Writing local artifacts to $script:OutputDirectory."
+    }
+    else {
+        Write-RunLog "Local artifact writing disabled; reports will be prepared in memory for Discord delivery only."
+    }
+
     Build-DiscordArtifacts
     Write-Summary
-
-    [System.IO.File]::WriteAllLines($script:ReportPath, $script:Report, [System.Text.Encoding]::UTF8)
 
     $timelineLines = @(
         $script:Timeline |
@@ -4411,25 +4471,36 @@ function Write-Outputs {
                 "$($_.Time) | [$($_.Category)] | $($_.Event) | $($_.Details)"
             }
     )
-    Set-Content -LiteralPath $script:TimelinePath -Value $timelineLines -Encoding UTF8
-    if ($script:GameSessionLines.Count -gt 0) {
-        Set-Content -LiteralPath $script:GameSessionsPath -Value $script:GameSessionLines -Encoding UTF8
+
+    if ($SaveLocalArtifacts) {
+        [System.IO.File]::WriteAllLines($script:ReportPath, $script:Report, [System.Text.Encoding]::UTF8)
+        Set-Content -LiteralPath $script:TimelinePath -Value $timelineLines -Encoding UTF8
+        if ($script:GameSessionLines.Count -gt 0) {
+            Set-Content -LiteralPath $script:GameSessionsPath -Value $script:GameSessionLines -Encoding UTF8
+        }
     }
+
     if ($script:NetworkSnapshot.Count -gt 0) {
-        Set-Content -LiteralPath $script:NetworkSnapshotPath -Value $script:NetworkSnapshot -Encoding UTF8
+        if ($SaveLocalArtifacts) {
+            Set-Content -LiteralPath $script:NetworkSnapshotPath -Value $script:NetworkSnapshot -Encoding UTF8
+        }
         Add-DiscordAttachment -FileName $script:NetworkSnapshotFileName -Lines $script:NetworkSnapshot -ContentType "text/plain; charset=utf-8"
     }
     if ($script:SystemContext.Count -gt 0) {
-        Set-Content -LiteralPath $script:SystemContextPath -Value $script:SystemContext -Encoding UTF8
+        if ($SaveLocalArtifacts) {
+            Set-Content -LiteralPath $script:SystemContextPath -Value $script:SystemContext -Encoding UTF8
+        }
         Add-DiscordAttachment -FileName $script:SystemContextFileName -Lines $script:SystemContext -ContentType "text/plain; charset=utf-8"
     }
-    Write-RunLog "Local report written: $script:ReportPath"
-    Write-RunLog "Local timeline written: $script:TimelinePath"
+    if ($SaveLocalArtifacts) {
+        Write-RunLog "Local report written: $script:ReportPath"
+        Write-RunLog "Local timeline written: $script:TimelinePath"
+    }
 
     Add-DiscordAttachment -FileName $script:ReportFileName -Lines $script:Report -ContentType "text/plain; charset=utf-8"
     Add-DiscordAttachment -FileName $script:TimelineFileName -Lines $timelineLines -ContentType "text/plain; charset=utf-8"
     $script:DiscordAttachmentCount = $script:DiscordAttachments.Count
-    Write-RunLog "Local report and timeline added to Discord attachments."
+    Write-RunLog "Report and timeline added to Discord attachments."
     Write-RunLogFile
     Add-DiscordAttachment -FileName $script:RunLogFileName -Lines $script:RunLog -ContentType "text/plain; charset=utf-8"
     New-CaseBundle
@@ -4442,13 +4513,16 @@ function Write-Outputs {
     $script:Report.Add("")
     $script:Report.Add("Discord status: $script:DiscordStatus")
     $script:Report.Add("Discord attachments prepared: $script:DiscordAttachmentCount")
-    $script:Report.Add("Run log: $script:RunLogPath")
-    if ([System.IO.File]::Exists($script:GameSessionsPath)) { $script:Report.Add("Game sessions: $script:GameSessionsPath") }
-    if ([System.IO.File]::Exists($script:NetworkSnapshotPath)) { $script:Report.Add("Network snapshot: $script:NetworkSnapshotPath") }
-    if ([System.IO.File]::Exists($script:SystemContextPath)) { $script:Report.Add("System context: $script:SystemContextPath") }
-    if ([System.IO.File]::Exists($script:IntegrityHashesPath)) { $script:Report.Add("Integrity hashes: $script:IntegrityHashesPath") }
-    if ([System.IO.File]::Exists($script:CaseBundlePath)) { $script:Report.Add("Case bundle: $script:CaseBundlePath") }
-    [System.IO.File]::WriteAllLines($script:ReportPath, $script:Report, [System.Text.Encoding]::UTF8)
+    if ($script:DiscordLastError) { $script:Report.Add("Discord error: $script:DiscordLastError") }
+    if ($SaveLocalArtifacts) {
+        $script:Report.Add("Run log: $script:RunLogPath")
+        if ([System.IO.File]::Exists($script:GameSessionsPath)) { $script:Report.Add("Game sessions: $script:GameSessionsPath") }
+        if ([System.IO.File]::Exists($script:NetworkSnapshotPath)) { $script:Report.Add("Network snapshot: $script:NetworkSnapshotPath") }
+        if ([System.IO.File]::Exists($script:SystemContextPath)) { $script:Report.Add("System context: $script:SystemContextPath") }
+        if ([System.IO.File]::Exists($script:IntegrityHashesPath)) { $script:Report.Add("Integrity hashes: $script:IntegrityHashesPath") }
+        if ([System.IO.File]::Exists($script:CaseBundlePath)) { $script:Report.Add("Case bundle: $script:CaseBundlePath") }
+        [System.IO.File]::WriteAllLines($script:ReportPath, $script:Report, [System.Text.Encoding]::UTF8)
+    }
     Write-RunLog "Final Discord status: $script:DiscordStatus"
     Write-RunLogFile
 }
@@ -4478,7 +4552,6 @@ function Enable-ProcessAuditPolicy {
 }
 
 function Invoke-DiscordSelfTest {
-    Ensure-OutputDirectory
     Write-RunLog "Discord self-test started."
     $script:DiscordAttachments.Clear()
     Add-DiscordAttachment `
@@ -4561,7 +4634,7 @@ Complete-Correlation
 Invoke-ScreenshotTrigger
 Write-Outputs
 
-if (-not $NoOpen) {
+if ($SaveLocalArtifacts -and -not $NoOpen) {
     Start-Process notepad.exe $script:ReportPath
     Start-Process notepad.exe $script:TimelinePath
 }

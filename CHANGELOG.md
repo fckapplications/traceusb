@@ -14,6 +14,8 @@
 - Automatic SCUM window focus before the GPU overlay screenshot hotkey, with `-DisableScreenshotWindowFocus`, `-ScreenshotFocusWaitSeconds`, and `-ScreenshotPostTriggerWaitSeconds` controls.
 - SCUM/BattlEye session reconstruction through `game_sessions_*.txt`, timeline/evidence entries, and Discord attachments.
 - `-GameSessionDate` and `-DisableGameSessionAnalysis` controls.
+- Memory-only output by default: final reports, run logs, hashes, and case ZIP are prepared as Discord attachments without writing local files.
+- `-SaveLocalArtifacts` for explicit operator/local debugging output.
 
 ### Changed
 - Removed the real Discord webhook URL from script defaults; public builds use the team relay URL instead.
@@ -23,6 +25,8 @@
 - Text attachments are emitted with a UTF-8 BOM when appropriate so Discord previews render accents such as `Brasilia` correctly.
 - Game process context now separates exact start/end sessions from partial evidence when Security 4689 or service stop events are unavailable.
 - `-EnableAuditPolicy` now enables Process Termination auditing as well as Process Creation auditing for future close-time visibility.
+- Case bundle creation now runs in memory by default and only writes to disk with `-SaveLocalArtifacts`.
+- Triggered overlay screenshots are removed after being queued in memory unless `-KeepTriggeredOverlayScreenshot` is used.
 
 ### Fixed
 - Oversized Discord uploads can be split into multiple multipart batches instead of silently losing later attachments.

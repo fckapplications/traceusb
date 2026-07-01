@@ -47,34 +47,12 @@ Two sensitive actions are opt-in only:
 
 ## Output
 
-TraceUSB writes timestamped local files:
+By default, TraceUSB does not write final report artifacts to the reviewed
+computer. It builds the report, timeline, evidence, translations, browser
+history matches, game sessions, run log, hashes, and case bundle in memory and
+sends them as Discord attachments through the configured relay.
 
-```text
-Desktop\analise_yyyyMMdd_HHmmss.txt
-Desktop\timeline_yyyyMMdd_HHmmss.txt
-Desktop\game_sessions_yyyyMMdd_HHmmss.txt
-Desktop\traceusb_run_yyyyMMdd_HHmmss.log
-Desktop\network_snapshot_yyyyMMdd_HHmmss.txt
-Desktop\system_context_yyyyMMdd_HHmmss.txt
-Desktop\integrity_hashes_yyyyMMdd_HHmmss.txt
-Desktop\TraceUSB_case_yyyyMMdd_HHmmss.zip
-```
-
-`analise.txt` is operator-readable.  
-`timeline.txt` is chronological.  
-`game_sessions.txt` reconstructs SCUM/BattlEye process and service activity
-for the selected day, including start, close, observed duration, and evidence
-quality when available.
-`traceusb_run.log` records operational status, including Discord delivery
-success/failure and timeout details.
-`network_snapshot.txt` records network metadata for fake-lag/VPN/proxy review.
-`system_context.txt` records host context such as OS, boot time, timezone, and
-administrator state.
-`integrity_hashes.txt` records SHA256 hashes for the case bundle contents.
-`TraceUSB_case_*.zip` packages the run artifacts for review.
-
-When Discord reporting is used, TraceUSB builds these sensitive artifacts as
-Discord download attachments instead of saving them locally by default:
+Default Discord attachments:
 
 ```text
 analise_yyyyMMdd_HHmmss.txt
@@ -91,14 +69,27 @@ TraceUSB_case_yyyyMMdd_HHmmss.zip
 overlay_screenshot_yyyyMMdd_HHmmss.png
 ```
 
-`analise_*.txt`, `timeline_*.txt`, `game_sessions_*.txt`, `network_snapshot_*.txt`,
-`system_context_*.txt`, `traceusb_run_*.log`, `integrity_hashes_*.txt`, and the
-case ZIP are written locally and are also attached to Discord when available.
+`analise.txt` is operator-readable.  
+`timeline.txt` is chronological.  
+`game_sessions.txt` reconstructs SCUM/BattlEye process and service activity
+for the selected day, including start, close, observed duration, and evidence
+quality when available.
+`traceusb_run.log` records operational status, including Discord delivery
+success/failure and timeout details.
+`network_snapshot.txt` records network metadata for fake-lag/VPN/proxy review.
+`system_context.txt` records host context such as OS, boot time, timezone, and
+administrator state.
+`integrity_hashes.txt` records SHA256 hashes for the case bundle contents.
+`TraceUSB_case_*.zip` packages the run artifacts for review.
+
 `overlay_screenshot_*.png/.jpg` is attached only when
 `-EnableScreenshotTrigger` is used and a new NVIDIA/AMD overlay screenshot file
-is detected after the hotkey.
-Use `-SaveDiscordAttachmentsLocal` only when you explicitly want the
-sensitive attachment-only files written to the local output folder.
+is detected after the hotkey. The triggered overlay screenshot is deleted after
+being read into memory unless `-KeepTriggeredOverlayScreenshot` is used.
+
+Use `-SaveLocalArtifacts` only when you explicitly want final artifacts written
+to `-OutputDirectory`. Use `-SaveDiscordAttachmentsLocal` only for local
+debugging of files that are normally attachment-only.
 
 Each structured evidence item includes:
 
@@ -135,14 +126,11 @@ irm "https://raw.githubusercontent.com/fckapplications/traceusb/main/TraceUSB.ps
 
 By default this internal build:
 
-* writes timestamped `analise_*.txt` and `timeline_*.txt` locally;
-* writes `game_sessions_*.txt` with SCUM/BattlEye start/close/duration context;
-* writes `traceusb_run_*.log` locally so network or webhook failures are visible;
-* writes `network_snapshot_*.txt`, `system_context_*.txt`, and a hashed case ZIP;
 * sends a Discord embed when a relay or webhook endpoint is configured;
-* attaches `analise_*.txt`, `timeline_*.txt`, `evidence_*.jsonl`, and `translations_*.txt`;
+* attaches `analise_*.txt`, `timeline_*.txt`, `game_sessions_*.txt`, `evidence_*.jsonl`, and `translations_*.txt`;
 * runs the filtered browser-history scan and attaches `filtered_history_*.txt`;
-* opens the local TXT files unless `-NoOpen` is used.
+* builds hashes and a case ZIP in memory;
+* does not save final artifacts locally unless `-SaveLocalArtifacts` is used.
 
 Local clone usage is still supported:
 
@@ -297,10 +285,12 @@ Customize game/session anchors:
 |---|---:|---|
 | `-LookbackHours` | `24` | Event and artifact lookback window |
 | `-GameSessionDate` | Today | Full local day used for SCUM/BattlEye session reconstruction |
-| `-OutputDirectory` | Desktop | Output folder |
-| `-NoOpen` | Off | Prevents Notepad from opening outputs |
+| `-OutputDirectory` | Desktop | Output folder used only by explicit local/debug modes |
+| `-NoOpen` | Off | Prevents Notepad from opening outputs when `-SaveLocalArtifacts` is used |
+| `-SaveLocalArtifacts` | Off | Writes final artifacts locally; public player runs should leave this off |
 | `-EnableAuditPolicy` | Off | Enables Process Creation and Process Termination auditing when running as admin |
 | `-EnableScreenshotTrigger` | Off | Focuses SCUM when possible, sends native GPU screenshot hotkeys, and attaches a detected overlay image |
+| `-KeepTriggeredOverlayScreenshot` | Off | Keeps the overlay screenshot file that TraceUSB triggered instead of deleting it after queueing the attachment |
 | `-DisableScreenshotWindowFocus` | Off | Keeps the old manual-focus behavior before sending the screenshot hotkey |
 | `-ScreenshotFocusWaitSeconds` | `3` | Wait after automatic SCUM focus before sending the overlay hotkey |
 | `-ScreenshotPostTriggerWaitSeconds` | `8` | Wait after hotkey before scanning for a new screenshot file |
@@ -341,8 +331,8 @@ Customize game/session anchors:
 | `-EnableNetworkAnomalyScan` | On | Collects network metadata and indicators relevant to fake-lag review |
 | `-DisableNetworkAnomalyScan` | Off | Disables network metadata collection |
 | `-DisableGameSessionAnalysis` | Off | Disables SCUM/BattlEye session reconstruction |
-| `-EnableCaseBundle` | On | Creates a timestamped ZIP with run artifacts and SHA256 hashes |
-| `-DisableCaseBundle` | Off | Disables local case bundle ZIP creation |
+| `-EnableCaseBundle` | On | Creates an in-memory ZIP attachment with run artifacts and SHA256 hashes |
+| `-DisableCaseBundle` | Off | Disables case bundle ZIP creation |
 | `-SQLiteCliPath` | Auto-detect | Optional path to `sqlite3.exe` |
 | `-PortableSQLitePath` | Empty | Optional path to a portable, hash-pinned `sqlite3.exe` |
 | `-PortableSQLiteDownloadUrl` | SQLite 3.53.3 tools | Pinned temporary SQLite tools download used when no local reader exists |
@@ -377,16 +367,14 @@ Prefetch/BAM are de-prioritized in the embed but remain available in
 `analise_*.txt`, `timeline_*.txt`, `evidence_*.jsonl`, `translations_*.txt`,
 optional `filtered_history_*.txt`, and optional overlay screenshots are sent as
 Discord download attachments below the embed. Sensitive attachment-only files
-are not saved locally unless `-SaveDiscordAttachmentsLocal` is used.
-TraceUSB writes local `analise_*.txt`, `timeline_*.txt`, and
-`traceusb_run_*.log` before attempting Discord delivery, so a webhook outage
-does not prevent local report generation.
+are not saved locally unless `-SaveDiscordAttachmentsLocal` or
+`-SaveLocalArtifacts` is used.
 
 Discord delivery uses an explicit timeout, forces TLS 1.2 where supported, and
 splits attachments into batches when file count or payload size crosses the
 configured limits. If the first multipart upload fails, TraceUSB falls back to
-sending the embed only and records that degraded status in `analise_*.txt` and
-`traceusb_run_*.log`.
+sending the embed only and prints the degraded/failed status in the console.
+Use `-VerboseConsole` for live progress lines.
 
 For review before posting, use `-DiscordPreviewPath`; this writes:
 
@@ -424,6 +412,9 @@ client must provide the same token through `-DiscordRelayToken` or
 `TRACEUSB_DISCORD_RELAY_TOKEN`, which is not ideal for the one-command player
 flow. For the public command flow, leave the token unset and rely on the Worker
 URL plus Cloudflare-side abuse controls/rate limiting.
+
+If the Worker still has `TRACEUSB_RELAY_TOKEN` configured and the player runs
+the one-command public flow, Discord delivery will fail with HTTP `401`.
 
 The current public relay default is:
 
@@ -512,7 +503,7 @@ capture tools, and route optimizers can be legitimate.
 
 ## Case Bundle
 
-When enabled, TraceUSB creates:
+When enabled, TraceUSB creates an in-memory ZIP attachment:
 
 ```text
 TraceUSB_case_yyyyMMdd_HHmmss.zip
@@ -523,7 +514,8 @@ The ZIP contains the run artifacts generated by TraceUSB, including analysis,
 timeline, evidence JSONL, translations, optional filtered history, network
 snapshot, system context, and run log. `integrity_hashes_*.txt` records SHA256
 hashes for the files inside the case bundle so reviewers can detect accidental
-or intentional changes after collection.
+or intentional changes after collection. These files are not saved locally
+unless `-SaveLocalArtifacts` is used.
 
 ---
 
@@ -638,7 +630,10 @@ Invoke-Pester .\tests
 
 ## Privacy
 
-All analysis is local. TraceUSB does not communicate with external services and does not upload investigation data.
+TraceUSB collects native Windows metadata locally, builds artifacts in memory,
+and sends them to the configured Discord relay by default. It does not store the
+real Discord webhook in the public script. Final report artifacts are not saved
+locally unless an operator explicitly enables local/debug output.
 
 ---
 
