@@ -26,7 +26,7 @@ The report prioritizes correlated, explainable evidence instead of dumping every
 ## Safe Defaults
 
 This internal review build is configured to run the Discord delivery path and
-filtered browser-history keyword scan by default when a webhook source is
+filtered browser-history keyword scan by default when a relay or webhook endpoint is
 available. Use `-DisableDiscordWebhook -DisableBrowserHistoryScan` for a fully
 local dry run.
 
@@ -83,11 +83,15 @@ system_context_yyyyMMdd_HHmmss.txt
 traceusb_run_yyyyMMdd_HHmmss.log
 integrity_hashes_yyyyMMdd_HHmmss.txt
 TraceUSB_case_yyyyMMdd_HHmmss.zip
+overlay_screenshot_yyyyMMdd_HHmmss.png
 ```
 
 `analise_*.txt`, `timeline_*.txt`, `network_snapshot_*.txt`,
 `system_context_*.txt`, `traceusb_run_*.log`, `integrity_hashes_*.txt`, and the
 case ZIP are written locally and are also attached to Discord when available.
+`overlay_screenshot_*.png/.jpg` is attached only when
+`-EnableScreenshotTrigger` is used and a new NVIDIA/AMD overlay screenshot file
+is detected after the hotkey.
 Use `-SaveDiscordAttachmentsLocal` only when you explicitly want the
 sensitive attachment-only files written to the local output folder.
 
@@ -118,7 +122,7 @@ It is not proof of cheating.
 
 ## Usage
 
-Run an internal review with the configured Discord webhook:
+Run an internal review with the configured Discord relay or local webhook:
 
 ```powershell
 .\TraceUSB.ps1
@@ -129,12 +133,12 @@ By default this internal build:
 * writes timestamped `analise_*.txt` and `timeline_*.txt` locally;
 * writes `traceusb_run_*.log` locally so network or webhook failures are visible;
 * writes `network_snapshot_*.txt`, `system_context_*.txt`, and a hashed case ZIP;
-* sends a Discord embed when a webhook is configured;
+* sends a Discord embed when a relay or webhook endpoint is configured;
 * attaches `analise_*.txt`, `timeline_*.txt`, `evidence_*.jsonl`, and `translations_*.txt`;
 * runs the filtered browser-history scan and attaches `filtered_history_*.txt`;
 * opens the local TXT files unless `-NoOpen` is used.
 
-Test only the Discord webhook path, including a small non-forensic attachment:
+Test only the Discord delivery path, including a small non-forensic attachment:
 
 ```powershell
 .\TraceUSB.ps1 -DiscordSelfTest -VerboseConsole
@@ -178,6 +182,10 @@ Opt in to GPU screenshot hotkeys:
 .\TraceUSB.ps1 -EnableScreenshotTrigger
 ```
 
+This sends the detected NVIDIA/AMD overlay hotkey, searches known overlay
+screenshot folders for a new image, and attaches that image to Discord/case
+outputs when found. TraceUSB does not take a desktop screenshot fallback.
+
 Create a Discord embed preview without sending anything:
 
 ```powershell
@@ -187,11 +195,16 @@ Create a Discord embed preview without sending anything:
 This writes a timestamped preview such as
 `discord_preview_yyyyMMdd_HHmmss.html`.
 
-Send a formatted Discord webhook with an explicit URL:
+Use a server-side Discord relay, recommended for public GitHub distribution:
 
 ```powershell
-.\TraceUSB.ps1 -DiscordWebhookUrl "https://discord.com/api/webhooks/..."
+$env:TRACEUSB_DISCORD_RELAY_URL = "https://your-relay.example/traceusb"
+$env:TRACEUSB_DISCORD_RELAY_TOKEN = "optional-shared-token"
+.\TraceUSB.ps1
 ```
+
+The relay keeps the real Discord webhook outside the public script. A reference
+Cloudflare Worker is provided in `relay/cloudflare-worker.js`.
 
 Save the Discord webhook locally with Windows DPAPI encryption:
 
@@ -215,6 +228,19 @@ Or use an environment variable instead of passing the URL on the command line:
 $env:TRACEUSB_DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/..."
 .\TraceUSB.ps1
 ```
+
+Direct webhook usage is intended for local/internal operation only. Do not put a
+real Discord webhook URL in `TraceUSB.ps1`, README examples, commits, issues, or
+public release notes.
+
+Save Discord payload details without sending HTTP:
+
+```powershell
+.\TraceUSB.ps1 -DiscordDebug -NoOpen
+```
+
+This writes `discord_payload_*.json` and `discord_attachments_*.txt` for
+diagnostics.
 
 Run Discord attachments and filtered browser-history scan explicitly:
 
@@ -262,12 +288,17 @@ Customize game/session anchors:
 | `-EnableAuditPolicy` | Off | Enables Process Creation auditing when running as admin |
 | `-EnableScreenshotTrigger` | Off | Sends native GPU screenshot hotkeys when runtime context exists |
 | `-IncludeLowConfidence` | Off | Includes low/context evidence in the readable report |
-| `-EnableDiscordWebhook` | On | Sends a Discord embed when a webhook source is configured |
+| `-EnableDiscordWebhook` | On | Sends a Discord embed when a relay or webhook endpoint is configured |
 | `-DisableDiscordWebhook` | Off | Disables Discord posting for dry runs |
-| `-DiscordWebhookUrl` | Empty | Discord webhook endpoint |
+| `-DiscordWebhookUrl` | Empty | Direct Discord webhook endpoint for local/internal use |
 | `-DiscordWebhookSecretPath` | Empty | Reads a Windows DPAPI encrypted webhook secret |
 | `-DiscordWebhookEnvVar` | `TRACEUSB_DISCORD_WEBHOOK_URL` | Environment variable fallback for webhook URL |
+| `-DiscordRelayUrl` | Empty | Server-side relay endpoint that forwards to Discord without exposing the real webhook |
+| `-DiscordRelayEnvVar` | `TRACEUSB_DISCORD_RELAY_URL` | Environment variable fallback for relay URL |
+| `-DiscordRelayToken` | Empty | Optional shared token sent to the relay as `X-TraceUSB-Relay-Token` |
+| `-DiscordRelayTokenEnvVar` | `TRACEUSB_DISCORD_RELAY_TOKEN` | Environment variable fallback for relay token |
 | `-SaveDiscordWebhookSecret` | Off | Saves `-DiscordWebhookUrl` to `-DiscordWebhookSecretPath` using DPAPI and exits |
+| `-DiscordDebug` | Off | Saves Discord payload/attachment manifest and skips HTTP send |
 | `-DiscordPreviewPath` | Empty | Writes local HTML preview and matching JSON payload |
 | `-DiscordUsername` | `TraceUSB` | Webhook display name |
 | `-DiscordTitle` | TraceUSB summary | Embed title |
@@ -275,6 +306,8 @@ Customize game/session anchors:
 | `-DiscordMaxItems` | `8` | Maximum findings in the embed |
 | `-DiscordTimeoutSeconds` | `20` | HTTP timeout for Discord sends |
 | `-DiscordMaxAttachmentBytes` | `7000000` | Per-attachment truncation threshold before upload |
+| `-DiscordMaxPayloadBytes` | `24000000` | Approximate total attachment bytes per Discord/relay request |
+| `-DiscordMaxFilesPerMessage` | `10` | Maximum files per Discord/relay request before batching |
 | `-DiscordSelfTest` | Off | Sends a small non-forensic test embed and attachment, then exits |
 | `-VerboseConsole` | Off | Prints progress lines, useful for `irm ... \| iex` runs |
 | `-DiscordAlertColor` | `D64545` | Embed border color for high confidence |
@@ -293,6 +326,11 @@ Customize game/session anchors:
 | `-EnableCaseBundle` | On | Creates a timestamped ZIP with run artifacts and SHA256 hashes |
 | `-DisableCaseBundle` | Off | Disables local case bundle ZIP creation |
 | `-SQLiteCliPath` | Auto-detect | Optional path to `sqlite3.exe` |
+| `-PortableSQLitePath` | Empty | Optional path to a portable, hash-pinned `sqlite3.exe` |
+| `-PortableSQLiteDownloadUrl` | SQLite 3.53.3 tools | Pinned temporary SQLite tools download used when no local reader exists |
+| `-PortableSQLiteDownloadSha256` | Pinned | SHA256 expected for the configured SQLite tools ZIP |
+| `-PortableSQLiteExeSha256` | Pinned | SHA256 expected for extracted `sqlite3.exe` |
+| `-DisablePortableSQLiteDownload` | Off | Prevents the trusted temporary SQLite download attempt |
 | `-NoRedactUrls` | Off | Keeps full matched URLs instead of redacting query strings |
 | `-GameProcessPatterns` | SCUM/BattlEye defaults | Process names used as temporal anchors |
 
@@ -301,10 +339,13 @@ Customize game/session anchors:
 ## Discord Reporting
 
 Discord reporting is enabled by default in this internal build. Posting still
-requires a webhook source. The webhook source can be `-DiscordWebhookUrl`,
-`-DiscordWebhookSecretPath`, a hardcoded direct URL in `-DiscordWebhookEnvVar`,
-or the configured environment variable. Use `-DisableDiscordWebhook` for dry
-runs.
+requires a delivery endpoint. For public GitHub distribution, use
+`-DiscordRelayUrl` or `TRACEUSB_DISCORD_RELAY_URL`; the relay forwards to
+Discord with the real webhook stored server-side. Direct webhook delivery via
+`-DiscordWebhookUrl`, `-DiscordWebhookSecretPath`, or
+`TRACEUSB_DISCORD_WEBHOOK_URL` remains available for controlled local/internal
+use. Use `-DisableDiscordWebhook` for local dry runs or `-DiscordDebug` to save
+the JSON payload and attachment manifest without sending HTTP.
 
 The Discord embed summarizes findings and includes operator-friendly suggested
 translations. The embed prioritizes review-worthy categories such as Defender,
@@ -315,17 +356,18 @@ Prefetch/BAM are de-prioritized in the embed but remain available in
 `evidence_*.jsonl`.
 
 `analise_*.txt`, `timeline_*.txt`, `evidence_*.jsonl`, `translations_*.txt`,
-and optional `filtered_history_*.txt` are sent as Discord download attachments
-below the embed. Sensitive attachment-only files are not saved locally unless
-`-SaveDiscordAttachmentsLocal` is used.
+optional `filtered_history_*.txt`, and optional overlay screenshots are sent as
+Discord download attachments below the embed. Sensitive attachment-only files
+are not saved locally unless `-SaveDiscordAttachmentsLocal` is used.
 TraceUSB writes local `analise_*.txt`, `timeline_*.txt`, and
 `traceusb_run_*.log` before attempting Discord delivery, so a webhook outage
 does not prevent local report generation.
 
 Discord delivery uses an explicit timeout, forces TLS 1.2 where supported, and
-first attempts multipart upload with attachments. If multipart upload fails,
-TraceUSB falls back to sending the embed only and records that degraded status
-in `analise_*.txt` and `traceusb_run_*.log`.
+splits attachments into batches when file count or payload size crosses the
+configured limits. If the first multipart upload fails, TraceUSB falls back to
+sending the embed only and records that degraded status in `analise_*.txt` and
+`traceusb_run_*.log`.
 
 For review before posting, use `-DiscordPreviewPath`; this writes:
 
@@ -347,6 +389,28 @@ profile on the same machine.
 If you need to distribute TraceUSB to players without exposing the Discord
 webhook, use a small server-side relay endpoint instead of embedding the real
 Discord URL in the script.
+
+### Discord Relay
+
+`relay/cloudflare-worker.js` is a ready reference relay for Cloudflare Workers.
+Configure these Worker secrets/variables:
+
+```text
+DISCORD_WEBHOOK_URL=<real Discord webhook URL>
+TRACEUSB_RELAY_TOKEN=<optional shared token>
+```
+
+Then configure TraceUSB with:
+
+```powershell
+$env:TRACEUSB_DISCORD_RELAY_URL = "https://your-worker.example/traceusb"
+$env:TRACEUSB_DISCORD_RELAY_TOKEN = "same optional shared token"
+```
+
+The client sends the same Discord-compatible JSON or multipart payload to the
+relay. The relay forwards it to Discord. This is materially safer than
+obfuscating or encrypting a webhook inside open-source client code, because the
+client never receives the real Discord URL.
 
 ---
 
@@ -422,9 +486,20 @@ Supported targets:
 * Opera
 * Firefox
 
-TraceUSB reads browser history SQLite databases through `sqlite3.exe` when
-available. If SQLite is unavailable, the scan is skipped cleanly and noted in
-the report.
+TraceUSB reads browser history SQLite databases through a SQLite reader resolved
+in this order:
+
+1. explicit `-SQLiteCliPath`;
+2. explicit `-PortableSQLitePath`;
+3. bundled `tools\sqlite\win-x64\sqlite3.exe` with a `.sha256` sidecar;
+4. `sqlite3.exe` or `sqlite3` on `PATH`;
+5. the pinned temporary SQLite tools download configured in `TraceUSB.ps1`.
+
+The temporary download is hash-validated, extracted under `%TEMP%`, used only
+for the browser-history scan, and then removed. Use
+`-DisablePortableSQLiteDownload` when the review must not contact the official
+SQLite download host. If no reader is available, the scan is skipped cleanly and
+the report records the resolution order that was attempted.
 
 URLs are redacted by default: query strings are replaced with
 `query_redacted=true`. Use `-NoRedactUrls` only when the review process

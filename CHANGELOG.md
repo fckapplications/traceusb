@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.6.0] - Relay, Portable History Reader, and Screenshot Attachments
+
+### Added
+- Discord relay delivery via `-DiscordRelayUrl` / `TRACEUSB_DISCORD_RELAY_URL`, with optional `X-TraceUSB-Relay-Token` support.
+- Reference Cloudflare Worker relay in `relay/cloudflare-worker.js` so the real Discord webhook can stay server-side.
+- `-DiscordDebug` mode to save the Discord payload and attachment manifest without sending HTTP.
+- Discord attachment batching through `-DiscordMaxPayloadBytes` and `-DiscordMaxFilesPerMessage`.
+- Portable SQLite reader support through `-PortableSQLitePath`, bundled `tools\sqlite\win-x64\sqlite3.exe`, PATH fallback, and a pinned temporary SQLite tools download.
+- SHA256 validation for bundled/downloaded SQLite tooling.
+- NVIDIA/AMD overlay screenshot detection after `-EnableScreenshotTrigger`, with the captured image queued as a Discord/case-bundle attachment when found.
+
+### Changed
+- Removed the real Discord webhook URL from script defaults; public builds should use a relay or environment variables.
+- Browser-history scans now detect supported databases before resolving/downloading SQLite tooling.
+- Discord delivery status now distinguishes relay, direct webhook, debug, embed-only, attachment, and partial-attachment outcomes.
+- Screenshot triggering now reports whether a new overlay screenshot file was actually detected.
+
+### Fixed
+- Oversized Discord uploads can be split into multiple multipart batches instead of silently losing later attachments.
+- Browser-history diagnostics now explain SQLite reader resolution order when no reader is available.
+
 ## [1.5.0] - Forensic Correlation Worktree
 
 ### Added

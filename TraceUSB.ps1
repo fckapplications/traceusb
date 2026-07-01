@@ -21,9 +21,19 @@ param(
 
     [string]$DiscordWebhookSecretPath,
 
-    [string]$DiscordWebhookEnvVar = "https://discord.com/api/webhooks/1517354954388410419/SoBhKuy38K_9Rkke31dy_uXHKrfxpr8V5ygsDwBbWqkF4wYjh0bHGHqh-wzxni1KpSmL",
+    [string]$DiscordWebhookEnvVar = "TRACEUSB_DISCORD_WEBHOOK_URL",
+
+    [string]$DiscordRelayUrl,
+
+    [string]$DiscordRelayEnvVar = "TRACEUSB_DISCORD_RELAY_URL",
+
+    [string]$DiscordRelayToken,
+
+    [string]$DiscordRelayTokenEnvVar = "TRACEUSB_DISCORD_RELAY_TOKEN",
 
     [switch]$SaveDiscordWebhookSecret,
+
+    [switch]$DiscordDebug,
 
     [string]$DiscordPreviewPath,
 
@@ -41,6 +51,12 @@ param(
 
     [ValidateRange(1024, 25000000)]
     [int]$DiscordMaxAttachmentBytes = 7000000,
+
+    [ValidateRange(1048576, 50000000)]
+    [int]$DiscordMaxPayloadBytes = 24000000,
+
+    [ValidateRange(1, 10)]
+    [int]$DiscordMaxFilesPerMessage = 10,
 
     [switch]$DiscordSelfTest,
 
@@ -107,6 +123,16 @@ param(
 
     [string]$SQLiteCliPath,
 
+    [string]$PortableSQLitePath,
+
+    [string]$PortableSQLiteDownloadUrl = "https://www.sqlite.org/2026/sqlite-tools-win-x64-3530300.zip",
+
+    [string]$PortableSQLiteDownloadSha256 = "C90FE36442CF573E8A19B3E8733D121622B8E2D5A0C47CBDA97AEBA9517D1C45",
+
+    [string]$PortableSQLiteExeSha256 = "0BF6020E303A1A49DD576BBE259F8C2A05DB689408A2F1F968714F5CF63714AF",
+
+    [switch]$DisablePortableSQLiteDownload,
+
     [switch]$NoRedactUrls,
 
     [string[]]$GameProcessPatterns = @(
@@ -158,6 +184,8 @@ $script:SystemContextFileName = "system_context_$($script:ArtifactSuffix).txt"
 $script:IntegrityHashesFileName = "integrity_hashes_$($script:ArtifactSuffix).txt"
 $script:CaseBundleFileName = "TraceUSB_case_$($script:ArtifactSuffix).zip"
 $script:RunLogFileName = "traceusb_run_$($script:ArtifactSuffix).log"
+$script:DiscordDebugPayloadFileName = "discord_payload_$($script:ArtifactSuffix).json"
+$script:DiscordDebugManifestFileName = "discord_attachments_$($script:ArtifactSuffix).txt"
 $script:ReportPath = Join-Path $script:OutputDirectory $script:ReportFileName
 $script:TimelinePath = Join-Path $script:OutputDirectory $script:TimelineFileName
 $script:EvidencePath = Join-Path $script:OutputDirectory $script:EvidenceFileName
@@ -168,6 +196,8 @@ $script:SystemContextPath = Join-Path $script:OutputDirectory $script:SystemCont
 $script:IntegrityHashesPath = Join-Path $script:OutputDirectory $script:IntegrityHashesFileName
 $script:CaseBundlePath = Join-Path $script:OutputDirectory $script:CaseBundleFileName
 $script:RunLogPath = Join-Path $script:OutputDirectory $script:RunLogFileName
+$script:DiscordDebugPayloadPath = Join-Path $script:OutputDirectory $script:DiscordDebugPayloadFileName
+$script:DiscordDebugManifestPath = Join-Path $script:OutputDirectory $script:DiscordDebugManifestFileName
 
 $script:Report = New-Object System.Collections.Generic.List[string]
 $script:Timeline = New-Object System.Collections.Generic.List[object]
@@ -175,10 +205,14 @@ $script:Evidence = New-Object System.Collections.Generic.List[object]
 $script:FilteredHistoryHits = New-Object System.Collections.Generic.List[object]
 $script:NetworkSnapshot = New-Object System.Collections.Generic.List[string]
 $script:SystemContext = New-Object System.Collections.Generic.List[string]
-$script:DiscordAttachments = New-Object System.Collections.Generic.List[object]
+$script:DiscordAttachments = New-Object System.Collections.ArrayList
 $script:RunLog = New-Object System.Collections.Generic.List[string]
 $script:DiscordStatus = if ($EnableDiscordWebhook) { "not_attempted" } else { "disabled" }
 $script:DiscordAttachmentCount = 0
+$script:ScreenshotCapturePath = $null
+$script:ScreenshotCaptureFileName = $null
+$script:ScreenshotCaptureContentType = $null
+$script:PortableSQLiteTempRoot = $null
 $script:Correlation = @{}
 $script:GameSessionTimes = New-Object System.Collections.Generic.List[datetime]
 $script:UsbTimes = New-Object System.Collections.Generic.List[datetime]
@@ -1408,33 +1442,157 @@ function Collect-NetworkAnomalies {
     }
 }
 
+function Get-OverlayScreenshotRoots {
+    $roots = New-Object System.Collections.Generic.List[string]
+
+    function Add-RootIfPresent {
+        param([string]$Path)
+        if ($Path -and (Test-Path -LiteralPath $Path)) {
+            $roots.Add([System.IO.Path]::GetFullPath($Path))
+        }
+    }
+
+    if ($env:USERPROFILE) {
+        Add-RootIfPresent (Join-Path $env:USERPROFILE "Videos\Captures")
+        Add-RootIfPresent (Join-Path $env:USERPROFILE "Videos\NVIDIA")
+        Add-RootIfPresent (Join-Path $env:USERPROFILE "Videos\NVIDIA Share")
+        Add-RootIfPresent (Join-Path $env:USERPROFILE "Videos\Radeon ReLive")
+        Add-RootIfPresent (Join-Path $env:USERPROFILE "Pictures\Screenshots")
+        Add-RootIfPresent (Join-Path $env:USERPROFILE "Pictures\NVIDIA Share")
+    }
+
+    if ($env:OneDrive) {
+        Add-RootIfPresent (Join-Path $env:OneDrive "Pictures\Screenshots")
+        Add-RootIfPresent (Join-Path $env:OneDrive "Videos\Captures")
+    }
+
+    return @($roots | Select-Object -Unique)
+}
+
+function Get-ImageContentType {
+    param([string]$Path)
+
+    $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
+    switch ($extension) {
+        ".jpg"  { return "image/jpeg" }
+        ".jpeg" { return "image/jpeg" }
+        ".png"  { return "image/png" }
+        ".bmp"  { return "image/bmp" }
+        ".webp" { return "image/webp" }
+        default { return "application/octet-stream" }
+    }
+}
+
+function Find-NewOverlayScreenshot {
+    param(
+        [datetime]$Since,
+        [string[]]$Roots
+    )
+
+    if (-not $Roots -or $Roots.Count -eq 0) { return $null }
+
+    $extensions = @(".png", ".jpg", ".jpeg", ".bmp", ".webp")
+    $threshold = $Since.AddSeconds(-5)
+    $candidates = New-Object System.Collections.Generic.List[object]
+
+    foreach ($root in $Roots) {
+        try {
+            Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Length -gt 0 -and
+                    $_.LastWriteTime -ge $threshold -and
+                    ($extensions -contains $_.Extension.ToLowerInvariant())
+                } |
+                ForEach-Object { $candidates.Add($_) }
+        }
+        catch {
+            Write-RunLog "Screenshot folder scan failed for $root`: $($_.Exception.Message)"
+        }
+    }
+
+    return @($candidates | Sort-Object LastWriteTime, Length -Descending | Select-Object -First 1)
+}
+
 function Invoke-ScreenshotTrigger {
     if (-not $EnableScreenshotTrigger) { return }
 
-    $runtimeEvidence = @($script:Evidence | Where-Object { $_.Category -eq "RuntimeContext" })
-    if ($runtimeEvidence.Count -eq 0) { return }
-
     Write-Section "SCREENSHOT TRIGGER"
-    $script:Report.Add("Screenshot trigger explicitly enabled. Returning focus to the game is required.")
+    $script:Report.Add("Screenshot trigger explicitly enabled. Return focus to the game before the countdown finishes.")
+    $script:Report.Add("No desktop screenshot fallback is used; TraceUSB only attaches an overlay-generated file when one is found.")
     $script:Report.Add("")
+
+    $runtimeEvidence = @($script:Evidence | Where-Object { $_.Category -eq "RuntimeContext" })
+    $runtimeSources = @($runtimeEvidence | ForEach-Object { $_.Source } | Select-Object -Unique)
+    $target = $null
+
+    if ($runtimeSources -contains "NVIDIA") {
+        $target = [PSCustomObject]@{
+            Source = "NVIDIA"
+            Hotkey = "%{F1}"
+            Label  = "ALT+F1"
+        }
+    }
+    elseif ($runtimeSources -contains "AMD") {
+        $target = [PSCustomObject]@{
+            Source = "AMD"
+            Hotkey = "^+i"
+            Label  = "CTRL+SHIFT+I"
+        }
+    }
+
+    if (-not $target) {
+        $script:Report.Add("Screenshot trigger skipped: no NVIDIA or AMD overlay runtime context was observed.")
+        Add-Evidence -Time (Get-Date) -Category "RuntimeContext" -Source "ScreenshotTrigger" -Confidence 10 -Reasons @("Screenshot trigger enabled but no supported GPU overlay runtime was observed") -Details "No NVIDIA/AMD runtime context" | Out-Null
+        return
+    }
+
+    $roots = @(Get-OverlayScreenshotRoots)
+    if ($roots.Count -gt 0) {
+        $script:Report.Add("Monitoring screenshot folders:")
+        foreach ($root in $roots) { $script:Report.Add("- $root") }
+        $script:Report.Add("")
+    }
+    else {
+        $script:Report.Add("No known overlay screenshot folders were found before triggering.")
+        $script:Report.Add("")
+    }
 
     try {
         Add-Type -AssemblyName System.Windows.Forms
         Start-Sleep -Seconds 15
 
-        if ($runtimeEvidence.Source -contains "NVIDIA") {
-            [System.Windows.Forms.SendKeys]::SendWait("%{F1}")
-            Add-Evidence -Time (Get-Date) -Category "RuntimeContext" -Source "NVIDIA" -Confidence 20 -Reasons @("Operator enabled screenshot trigger") -Details "NVIDIA ALT+F1 trigger sent" | Out-Null
-            $script:Report.Add("NVIDIA ALT+F1 trigger sent.")
+        $triggerTime = Get-Date
+        [System.Windows.Forms.SendKeys]::SendWait([string]$target.Hotkey)
+        $script:Report.Add("$($target.Source) screenshot hotkey sent: $($target.Label).")
+        Write-RunLog "$($target.Source) screenshot hotkey sent: $($target.Label)."
+
+        Start-Sleep -Seconds 8
+        $captured = Find-NewOverlayScreenshot -Since $triggerTime -Roots $roots
+
+        if ($captured) {
+            $extension = [System.IO.Path]::GetExtension($captured.FullName)
+            if (-not $extension) { $extension = ".png" }
+
+            $script:ScreenshotCapturePath = $captured.FullName
+            $script:ScreenshotCaptureFileName = "overlay_screenshot_$($script:ArtifactSuffix)$extension"
+            $script:ScreenshotCaptureContentType = Get-ImageContentType -Path $captured.FullName
+
+            $details = "$($target.Source) $($target.Label) trigger sent; new screenshot detected at $($captured.FullName)"
+            Add-Evidence -Time (Get-Date) -Category "RuntimeContext" -Source $target.Source -Confidence 25 -Reasons @("Operator enabled screenshot trigger", "Overlay screenshot file was detected after hotkey") -Details $details | Out-Null
+            $script:Report.Add("Overlay screenshot detected and queued for Discord/case bundle: $($script:ScreenshotCaptureFileName)")
+            Write-RunLog "Overlay screenshot detected: $($captured.FullName)"
         }
-        elseif ($runtimeEvidence.Source -contains "AMD") {
-            [System.Windows.Forms.SendKeys]::SendWait("^+i")
-            Add-Evidence -Time (Get-Date) -Category "RuntimeContext" -Source "AMD" -Confidence 20 -Reasons @("Operator enabled screenshot trigger") -Details "AMD CTRL+SHIFT+I trigger sent" | Out-Null
-            $script:Report.Add("AMD CTRL+SHIFT+I trigger sent.")
+        else {
+            $details = "$($target.Source) $($target.Label) trigger sent; no new screenshot file detected in known folders"
+            Add-Evidence -Time (Get-Date) -Category "RuntimeContext" -Source $target.Source -Confidence 15 -Reasons @("Operator enabled screenshot trigger", "No overlay screenshot file was detected after hotkey") -Details $details | Out-Null
+            $script:Report.Add("No new overlay screenshot file was detected after the hotkey.")
+            Write-RunLog "No overlay screenshot file detected after trigger."
         }
     }
     catch {
         $script:Report.Add("Screenshot trigger failed: $($_.Exception.Message)")
+        Write-RunLog "Screenshot trigger failed: $($_.Exception.Message)"
+        Add-Evidence -Time (Get-Date) -Category "RuntimeContext" -Source "ScreenshotTrigger" -Confidence 10 -Reasons @("Screenshot trigger failed") -Details $_.Exception.Message | Out-Null
     }
 }
 
@@ -1849,7 +2007,7 @@ function Add-DiscordAttachment {
         Content     = $content
         Bytes       = $attachmentBytes
         ContentType = $ContentType
-    })
+    }) | Out-Null
 
     if ($SaveDiscordAttachmentsLocal -and $LocalPath) {
         if ($Bytes) {
@@ -1869,22 +2027,279 @@ function Get-EvidenceJsonLines {
     )
 }
 
+function Get-TraceUsbScriptDirectory {
+    if ($PSScriptRoot) { return $PSScriptRoot }
+    if ($PSCommandPath) { return Split-Path -Parent $PSCommandPath }
+    if ($MyInvocation.MyCommand.Path) { return Split-Path -Parent $MyInvocation.MyCommand.Path }
+    try { return (Get-Location).Path } catch { return $null }
+}
+
+function Get-SidecarSha256 {
+    param([string]$Path)
+
+    if (-not $Path) { return $null }
+
+    $candidates = @(
+        "$Path.sha256",
+        ([System.IO.Path]::ChangeExtension($Path, ".sha256"))
+    ) | Select-Object -Unique
+
+    foreach ($candidate in $candidates) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+
+        try {
+            $raw = (Get-Content -Raw -LiteralPath $candidate).Trim()
+            $hash = ($raw -split '\s+')[0]
+            if ($hash -match '^[a-fA-F0-9]{64}$') {
+                return $hash.ToUpperInvariant()
+            }
+        }
+        catch {
+            Write-RunLog "Could not read SHA256 sidecar $candidate`: $($_.Exception.Message)"
+        }
+    }
+
+    return $null
+}
+
+function Test-Sha256Hash {
+    param(
+        [string]$Path,
+        [string]$ExpectedHash,
+        [string]$Label = "file"
+    )
+
+    if (-not $Path -or -not $ExpectedHash) { return $false }
+
+    try {
+        $expected = $ExpectedHash.Trim().ToUpperInvariant()
+        $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+        if ($actual -eq $expected) { return $true }
+
+        Write-RunLog "$Label SHA256 mismatch. Expected=$expected Actual=$actual Path=$Path"
+        return $false
+    }
+    catch {
+        Write-RunLog "$Label SHA256 validation failed for $Path`: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Resolve-PortableSQLiteExecutable {
+    param(
+        [string]$Path,
+        [string]$ExpectedSha256,
+        [switch]$RequireHash,
+        [string]$SourceLabel = "portable SQLite"
+    )
+
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ([System.IO.Path]::GetExtension($fullPath) -ne ".exe") { return $null }
+
+    $expected = $ExpectedSha256
+    if (-not $expected) {
+        $expected = Get-SidecarSha256 -Path $fullPath
+    }
+
+    if ($expected) {
+        if (-not (Test-Sha256Hash -Path $fullPath -ExpectedHash $expected -Label $SourceLabel)) {
+            return $null
+        }
+        Write-RunLog "$SourceLabel accepted after SHA256 validation: $fullPath"
+        return $fullPath
+    }
+
+    if ($RequireHash) {
+        Write-RunLog "$SourceLabel skipped because no SHA256 sidecar or expected hash was available: $fullPath"
+        return $null
+    }
+
+    Write-RunLog "$SourceLabel accepted without SHA256 validation because it was explicitly provided: $fullPath"
+    return $fullPath
+}
+
+function Expand-PortableSQLiteZip {
+    param(
+        [string]$ZipPath,
+        [string]$ZipSha256,
+        [string]$ExeSha256,
+        [string]$SourceLabel = "portable SQLite zip"
+    )
+
+    if (-not $ZipPath -or -not (Test-Path -LiteralPath $ZipPath)) { return $null }
+
+    $fullZipPath = [System.IO.Path]::GetFullPath($ZipPath)
+    if ([System.IO.Path]::GetExtension($fullZipPath) -ne ".zip") { return $null }
+
+    $expectedZipHash = $ZipSha256
+    if (-not $expectedZipHash) {
+        $expectedZipHash = Get-SidecarSha256 -Path $fullZipPath
+    }
+    if ($expectedZipHash -and -not (Test-Sha256Hash -Path $fullZipPath -ExpectedHash $expectedZipHash -Label $SourceLabel)) {
+        return $null
+    }
+
+    $tempRoot = Join-Path $env:TEMP ("TraceUSB-sqlite-" + [guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+        Expand-Archive -LiteralPath $fullZipPath -DestinationPath $tempRoot -Force
+
+        $sqliteExe = Get-ChildItem -LiteralPath $tempRoot -Recurse -Filter "sqlite3.exe" -File -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+        if (-not $sqliteExe) {
+            Write-RunLog "$SourceLabel did not contain sqlite3.exe: $fullZipPath"
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force
+            return $null
+        }
+
+        $expectedExeHash = $ExeSha256
+        if (-not $expectedExeHash) {
+            $expectedExeHash = Get-SidecarSha256 -Path $sqliteExe.FullName
+        }
+        if ($expectedExeHash -and -not (Test-Sha256Hash -Path $sqliteExe.FullName -ExpectedHash $expectedExeHash -Label "portable sqlite3.exe")) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force
+            return $null
+        }
+
+        if (-not $expectedExeHash) {
+            Write-RunLog "$SourceLabel skipped because extracted sqlite3.exe could not be hash-validated."
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force
+            return $null
+        }
+
+        $script:PortableSQLiteTempRoot = $tempRoot
+        Write-RunLog "$SourceLabel extracted and accepted: $($sqliteExe.FullName)"
+        return $sqliteExe.FullName
+    }
+    catch {
+        Write-RunLog "$SourceLabel extraction failed: $($_.Exception.Message)"
+        try { Remove-Item -LiteralPath $tempRoot -Recurse -Force } catch {}
+        return $null
+    }
+}
+
+function Remove-PortableSQLiteTemp {
+    if (-not $script:PortableSQLiteTempRoot) { return }
+
+    try {
+        if (Test-Path -LiteralPath $script:PortableSQLiteTempRoot) {
+            Remove-Item -LiteralPath $script:PortableSQLiteTempRoot -Recurse -Force
+            Write-RunLog "Portable SQLite temporary folder removed: $script:PortableSQLiteTempRoot"
+        }
+    }
+    catch {
+        Write-RunLog "Portable SQLite temporary cleanup failed: $($_.Exception.Message)"
+    }
+    finally {
+        $script:PortableSQLiteTempRoot = $null
+    }
+}
+
+function Resolve-BundledPortableSQLite {
+    $roots = New-Object System.Collections.Generic.List[string]
+    $scriptDir = Get-TraceUsbScriptDirectory
+    if ($scriptDir) { $roots.Add($scriptDir) }
+    try { $roots.Add((Get-Location).Path) } catch {}
+
+    $uniqueRoots = @($roots | Where-Object { $_ } | Select-Object -Unique)
+    $downloadFileName = $null
+    try {
+        if ($PortableSQLiteDownloadUrl) {
+            $downloadFileName = [System.IO.Path]::GetFileName(([uri]$PortableSQLiteDownloadUrl).AbsolutePath)
+        }
+    }
+    catch {}
+
+    foreach ($root in $uniqueRoots) {
+        $exeCandidates = @(
+            (Join-Path $root "tools\sqlite\win-x64\sqlite3.exe"),
+            (Join-Path $root "tools\sqlite\sqlite3.exe")
+        )
+
+        foreach ($candidate in $exeCandidates) {
+            $resolved = Resolve-PortableSQLiteExecutable -Path $candidate -ExpectedSha256 (Get-SidecarSha256 -Path $candidate) -RequireHash -SourceLabel "bundled portable sqlite3.exe"
+            if ($resolved) { return $resolved }
+        }
+
+        if ($downloadFileName) {
+            $zipCandidate = Join-Path $root "tools\sqlite\win-x64\$downloadFileName"
+            $resolvedZip = Expand-PortableSQLiteZip -ZipPath $zipCandidate -ZipSha256 (Get-SidecarSha256 -Path $zipCandidate) -ExeSha256 $PortableSQLiteExeSha256 -SourceLabel "bundled portable SQLite zip"
+            if ($resolvedZip) { return $resolvedZip }
+        }
+    }
+
+    return $null
+}
+
+function Invoke-PortableSQLiteDownload {
+    if ($DisablePortableSQLiteDownload) {
+        Write-RunLog "Portable SQLite download disabled."
+        return $null
+    }
+    if (-not $PortableSQLiteDownloadUrl -or -not $PortableSQLiteDownloadSha256 -or -not $PortableSQLiteExeSha256) {
+        Write-RunLog "Portable SQLite download skipped because URL or SHA256 pin is missing."
+        return $null
+    }
+
+    $tempRoot = Join-Path $env:TEMP ("TraceUSB-sqlite-download-" + [guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+        $zipPath = Join-Path $tempRoot ([System.IO.Path]::GetFileName(([uri]$PortableSQLiteDownloadUrl).AbsolutePath))
+
+        Write-RunLog "Downloading portable SQLite from official pinned URL."
+        Invoke-WebRequest -Uri $PortableSQLiteDownloadUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 45 -ErrorAction Stop
+
+        $resolved = Expand-PortableSQLiteZip -ZipPath $zipPath -ZipSha256 $PortableSQLiteDownloadSha256 -ExeSha256 $PortableSQLiteExeSha256 -SourceLabel "downloaded portable SQLite zip"
+        if ($resolved) {
+            try { Remove-Item -LiteralPath $tempRoot -Recurse -Force } catch {}
+            return $resolved
+        }
+    }
+    catch {
+        Write-RunLog "Portable SQLite download failed: $($_.Exception.Message)"
+    }
+
+    try { Remove-Item -LiteralPath $tempRoot -Recurse -Force } catch {}
+    return $null
+}
+
 function Resolve-SqliteCli {
     if ($SQLiteCliPath -and (Test-Path -LiteralPath $SQLiteCliPath)) {
+        Write-RunLog "SQLite reader resolved from -SQLiteCliPath: $SQLiteCliPath"
         return $SQLiteCliPath
     }
 
+    if ($PortableSQLitePath) {
+        $resolvedPortable = Resolve-PortableSQLiteExecutable -Path $PortableSQLitePath -ExpectedSha256 $PortableSQLiteExeSha256 -SourceLabel "-PortableSQLitePath sqlite3.exe"
+        if ($resolvedPortable) { return $resolvedPortable }
+    }
+
+    $bundledPortable = Resolve-BundledPortableSQLite
+    if ($bundledPortable) { return $bundledPortable }
+
     try {
         $cmd = Get-Command sqlite3.exe -ErrorAction SilentlyContinue
-        if ($cmd -and $cmd.Source) { return $cmd.Source }
+        if ($cmd -and $cmd.Source) {
+            Write-RunLog "SQLite reader resolved from PATH: $($cmd.Source)"
+            return $cmd.Source
+        }
     }
     catch {}
 
     try {
         $cmd = Get-Command sqlite3 -ErrorAction SilentlyContinue
-        if ($cmd -and $cmd.Source) { return $cmd.Source }
+        if ($cmd -and $cmd.Source) {
+            Write-RunLog "SQLite reader resolved from PATH: $($cmd.Source)"
+            return $cmd.Source
+        }
     }
     catch {}
+
+    $downloadedPortable = Invoke-PortableSQLiteDownload
+    if ($downloadedPortable) { return $downloadedPortable }
 
     return $null
 }
@@ -2311,13 +2726,6 @@ function Get-FilteredHistoryLines {
         return @($lines)
     }
 
-    $sqlite = Resolve-SqliteCli
-    if (-not $sqlite) {
-        $lines.Add("Browser history scan skipped: sqlite3.exe was not found. Provide -SQLiteCliPath or add sqlite3 to PATH.")
-        Add-Evidence -Time (Get-Date) -Category "BrowserHistory" -Source "BrowserHistoryScan" -Confidence 10 -Reasons @("Browser history scan requested but SQLite reader unavailable") -Details "sqlite3.exe unavailable" | Out-Null
-        return @($lines)
-    }
-
     $databases = @(Get-BrowserHistoryDatabases)
 
     if ($databases.Count -eq 0) {
@@ -2331,7 +2739,18 @@ function Get-FilteredHistoryLines {
         return @($lines)
     }
 
+    $sqlite = Resolve-SqliteCli
+    if (-not $sqlite) {
+        $lines.Add("Browser history scan skipped: no SQLite reader was available.")
+        $lines.Add("Resolution order: -SQLiteCliPath, -PortableSQLitePath, bundled tools\\sqlite\\win-x64\\sqlite3.exe, sqlite3 on PATH, pinned temporary portable download.")
+        $lines.Add("Use -DisablePortableSQLiteDownload to prevent the trusted temporary download attempt.")
+        Add-Evidence -Time (Get-Date) -Category "BrowserHistory" -Source "BrowserHistoryScan" -Confidence 10 -Reasons @("Browser history scan requested but SQLite reader unavailable") -Details "No sqlite3 reader available after explicit, bundled, PATH, and portable download attempts" | Out-Null
+        Remove-PortableSQLiteTemp
+        return @($lines)
+    }
+
     $lines.Add("Detected browser history databases: $($databases.Count)")
+    $lines.Add("SQLite reader: $sqlite")
     foreach ($db in $databases) {
         $lines.Add("- $($db.Browser) [$($db.Profile)]")
     }
@@ -2410,6 +2829,7 @@ function Get-FilteredHistoryLines {
     }
     finally {
         try { Remove-Item -LiteralPath $tempRoot -Recurse -Force } catch {}
+        Remove-PortableSQLiteTemp
     }
 
     if ($script:FilteredHistoryHits.Count -eq 0) {
@@ -2684,6 +3104,26 @@ function Save-DiscordWebhookSecret {
     Write-Host "This file can only be decrypted by the same Windows user profile on this machine."
 }
 
+function Get-EnvVarValue {
+    param([string]$Name)
+
+    if (-not $Name) { return $null }
+
+    try {
+        $envValue = [Environment]::GetEnvironmentVariable($Name, "Process")
+        if (-not $envValue) {
+            $envValue = [Environment]::GetEnvironmentVariable($Name, "User")
+        }
+        if (-not $envValue) {
+            $envValue = [Environment]::GetEnvironmentVariable($Name, "Machine")
+        }
+        if ($envValue) { return $envValue }
+    }
+    catch {}
+
+    return $null
+}
+
 function Get-DiscordWebhookUrl {
     if ($DiscordWebhookUrl) {
         return $DiscordWebhookUrl
@@ -2714,24 +3154,271 @@ function Get-DiscordWebhookUrl {
     }
 
     if ($DiscordWebhookEnvVar) {
-        if ($DiscordWebhookEnvVar -match '^https://') {
+        if ($DiscordWebhookEnvVar -match '^https?://') {
+            Write-RunLog "-DiscordWebhookEnvVar received a URL directly. This is supported only for local/internal use; prefer -DiscordWebhookUrl or a relay."
             return $DiscordWebhookEnvVar
         }
 
-        try {
-            $envValue = [Environment]::GetEnvironmentVariable($DiscordWebhookEnvVar, "Process")
-            if (-not $envValue) {
-                $envValue = [Environment]::GetEnvironmentVariable($DiscordWebhookEnvVar, "User")
-            }
-            if (-not $envValue) {
-                $envValue = [Environment]::GetEnvironmentVariable($DiscordWebhookEnvVar, "Machine")
-            }
-            if ($envValue) { return $envValue }
-        }
-        catch {}
+        $envValue = Get-EnvVarValue -Name $DiscordWebhookEnvVar
+        if ($envValue) { return $envValue }
     }
 
     return $null
+}
+
+function Get-DiscordRelayUrl {
+    if ($DiscordRelayUrl) { return $DiscordRelayUrl }
+    if ($DiscordRelayEnvVar) { return (Get-EnvVarValue -Name $DiscordRelayEnvVar) }
+    return $null
+}
+
+function Get-DiscordRelayToken {
+    if ($DiscordRelayToken) { return $DiscordRelayToken }
+    if ($DiscordRelayTokenEnvVar) { return (Get-EnvVarValue -Name $DiscordRelayTokenEnvVar) }
+    return $null
+}
+
+function Get-SafeEndpointSummary {
+    param([string]$Url)
+
+    if (-not $Url) { return "none" }
+    try {
+        $uri = [uri]$Url
+        return "$($uri.Scheme)://$($uri.Host)$($uri.AbsolutePath)"
+    }
+    catch {
+        return "unparseable endpoint"
+    }
+}
+
+function Get-DiscordDeliveryTarget {
+    $relay = Get-DiscordRelayUrl
+    if ($relay) {
+        $headers = @{}
+        $relayToken = Get-DiscordRelayToken
+        if ($relayToken) {
+            $headers["X-TraceUSB-Relay-Token"] = $relayToken
+        }
+
+        return [PSCustomObject]@{
+            Kind    = "relay"
+            Url     = $relay
+            Headers = $headers
+        }
+    }
+
+    $webhook = Get-DiscordWebhookUrl
+    if ($webhook) {
+        return [PSCustomObject]@{
+            Kind    = "webhook"
+            Url     = $webhook
+            Headers = @{}
+        }
+    }
+
+    return $null
+}
+
+function Add-DiscordTargetHeaders {
+    param(
+        $Client,
+        $Target
+    )
+
+    if (-not $Client -or -not $Target -or -not $Target.Headers) { return }
+
+    foreach ($key in $Target.Headers.Keys) {
+        $value = [string]$Target.Headers[$key]
+        if (-not $value) { continue }
+        try {
+            $Client.DefaultRequestHeaders.Remove($key) | Out-Null
+            $Client.DefaultRequestHeaders.Add($key, $value)
+        }
+        catch {
+            Write-RunLog "Could not set HTTP header $key`: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Get-DiscordAttachmentBytes {
+    param($Attachment)
+
+    if (-not $Attachment) { return @() }
+    if ($Attachment.Bytes) { return [byte[]]$Attachment.Bytes }
+    return [Text.Encoding]::UTF8.GetBytes([string]$Attachment.Content)
+}
+
+function Get-DiscordAttachmentBatches {
+    param([object[]]$Attachments)
+
+    $batches = New-Object System.Collections.Generic.List[object]
+    $current = New-Object System.Collections.Generic.List[object]
+    $currentBytes = 0
+
+    foreach ($attachment in @($Attachments)) {
+        if (-not $attachment -or -not $attachment.FileName) { continue }
+
+        $bytes = Get-DiscordAttachmentBytes -Attachment $attachment
+        $byteCount = if ($bytes) { $bytes.Length } else { 0 }
+        if ($byteCount -gt $DiscordMaxPayloadBytes) {
+            Write-RunLog "Attachment skipped because it exceeds DiscordMaxPayloadBytes: $($attachment.FileName) ($byteCount bytes)."
+            continue
+        }
+
+        $wouldExceedCount = $current.Count -ge $DiscordMaxFilesPerMessage
+        $wouldExceedBytes = ($current.Count -gt 0 -and ($currentBytes + $byteCount) -gt $DiscordMaxPayloadBytes)
+        if ($wouldExceedCount -or $wouldExceedBytes) {
+            $batches.Add([PSCustomObject]@{
+                Attachments = @($current.ToArray())
+                Bytes       = $currentBytes
+            })
+            $current.Clear()
+            $currentBytes = 0
+        }
+
+        $current.Add($attachment)
+        $currentBytes += $byteCount
+    }
+
+    if ($current.Count -gt 0) {
+        $batches.Add([PSCustomObject]@{
+            Attachments = @($current.ToArray())
+            Bytes       = $currentBytes
+        })
+    }
+
+    return @($batches.ToArray())
+}
+
+function Build-DiscordBatchPayload {
+    param(
+        $OriginalPayload,
+        [int]$BatchIndex,
+        [int]$BatchCount
+    )
+
+    if ($BatchIndex -eq 1) { return $OriginalPayload }
+
+    return @{
+        username = $DiscordUsername
+        content = "TraceUSB attachments batch $BatchIndex/$BatchCount for run $($script:RunStamp)."
+    }
+}
+
+function Write-DiscordDebugArtifacts {
+    param(
+        [string]$PayloadJson,
+        $Target,
+        [object[]]$Batches
+    )
+
+    Ensure-OutputDirectory
+    Set-Content -LiteralPath $script:DiscordDebugPayloadPath -Value $PayloadJson -Encoding UTF8
+
+    $manifest = New-Object System.Collections.Generic.List[string]
+    $manifest.Add("TraceUSB Discord debug manifest")
+    $manifest.Add("Generated: $(Get-Date)")
+    $manifest.Add("DeliveryKind: $($Target.Kind)")
+    $manifest.Add("Endpoint: $(Get-SafeEndpointSummary -Url $Target.Url)")
+    $manifest.Add("HTTP send skipped because -DiscordDebug was used.")
+    $manifest.Add("")
+
+    $batchNumber = 1
+    foreach ($batch in @($Batches)) {
+        $manifest.Add("Batch $batchNumber")
+        $manifest.Add("Bytes: $($batch.Bytes)")
+        foreach ($attachment in @($batch.Attachments)) {
+            $bytes = Get-DiscordAttachmentBytes -Attachment $attachment
+            $manifest.Add("- $($attachment.FileName) ($($bytes.Length) bytes, $($attachment.ContentType))")
+        }
+        $manifest.Add("")
+        $batchNumber++
+    }
+
+    if ($Batches.Count -eq 0) {
+        $manifest.Add("No attachments.")
+    }
+
+    Set-Content -LiteralPath $script:DiscordDebugManifestPath -Value $manifest -Encoding UTF8
+    $script:DiscordStatus = "debug_saved_no_send"
+    $script:Report.Add("")
+    $script:Report.Add("Discord debug enabled: payload and attachment manifest were saved without sending HTTP.")
+    $script:Report.Add("Discord debug payload: $script:DiscordDebugPayloadPath")
+    $script:Report.Add("Discord debug manifest: $script:DiscordDebugManifestPath")
+    Write-RunLog "Discord debug artifacts saved without sending HTTP."
+}
+
+function Invoke-DiscordJsonPost {
+    param(
+        $Target,
+        [string]$PayloadJson
+    )
+
+    $jsonClient = $null
+    $jsonContent = $null
+    try {
+        Add-Type -AssemblyName System.Net.Http
+        $jsonClient = New-Object System.Net.Http.HttpClient
+        $jsonClient.Timeout = [TimeSpan]::FromSeconds($DiscordTimeoutSeconds)
+        Add-DiscordTargetHeaders -Client $jsonClient -Target $Target
+
+        $jsonContent = New-Object System.Net.Http.StringContent($PayloadJson, [Text.Encoding]::UTF8, "application/json")
+        $jsonResponse = $jsonClient.PostAsync([string]$Target.Url, $jsonContent).GetAwaiter().GetResult()
+        if (-not $jsonResponse.IsSuccessStatusCode) {
+            $responseText = $jsonResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            throw "$($Target.Kind) returned HTTP $([int]$jsonResponse.StatusCode): $(Limit-Text -Text $responseText -MaxLength 800)"
+        }
+    }
+    finally {
+        if ($jsonContent) { $jsonContent.Dispose() }
+        if ($jsonClient) { $jsonClient.Dispose() }
+    }
+}
+
+function Invoke-DiscordMultipartPost {
+    param(
+        $Target,
+        [string]$PayloadJson,
+        [object[]]$Attachments
+    )
+
+    $client = $null
+    $multipart = $null
+    try {
+        Add-Type -AssemblyName System.Net.Http
+        $client = New-Object System.Net.Http.HttpClient
+        $client.Timeout = [TimeSpan]::FromSeconds($DiscordTimeoutSeconds)
+        Add-DiscordTargetHeaders -Client $client -Target $Target
+
+        $multipart = New-Object System.Net.Http.MultipartFormDataContent
+        $payloadContent = New-Object System.Net.Http.StringContent($PayloadJson, [Text.Encoding]::UTF8, "application/json")
+        $multipart.Add($payloadContent, "payload_json")
+
+        $index = 0
+        foreach ($attachment in @($Attachments)) {
+            if (-not $attachment -or -not $attachment.FileName) { continue }
+
+            $bytes = Get-DiscordAttachmentBytes -Attachment $attachment
+            $fileContent = New-Object -TypeName System.Net.Http.ByteArrayContent -ArgumentList (,$bytes)
+            if ($attachment.ContentType) {
+                $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse([string]$attachment.ContentType)
+            }
+            $multipart.Add($fileContent, "files[$index]", [string]$attachment.FileName)
+            $index++
+        }
+
+        $response = $client.PostAsync([string]$Target.Url, $multipart).GetAwaiter().GetResult()
+        if (-not $response.IsSuccessStatusCode) {
+            $responseText = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            throw "$($Target.Kind) returned HTTP $([int]$response.StatusCode): $(Limit-Text -Text $responseText -MaxLength 800)"
+        }
+
+        return $index
+    }
+    finally {
+        if ($multipart) { $multipart.Dispose() }
+        if ($client) { $client.Dispose() }
+    }
 }
 
 function Send-DiscordWebhook {
@@ -2739,17 +3426,17 @@ function Send-DiscordWebhook {
 
     if (-not $EnableDiscordWebhook) {
         $script:DiscordStatus = "disabled"
-        Write-RunLog "Discord webhook disabled."
+        Write-RunLog "Discord delivery disabled."
         return
     }
 
-    $resolvedWebhookUrl = Get-DiscordWebhookUrl
+    $target = Get-DiscordDeliveryTarget
 
-    if (-not $resolvedWebhookUrl) {
-        $script:DiscordStatus = "skipped_no_webhook"
+    if (-not $target) {
+        $script:DiscordStatus = "skipped_no_endpoint"
         $script:Report.Add("")
-        $script:Report.Add("Discord webhook skipped: no URL, DPAPI secret, or environment variable was available.")
-        Write-RunLog "Discord webhook skipped: no webhook URL was available."
+        $script:Report.Add("Discord delivery skipped: no relay URL, webhook URL, DPAPI secret, or environment variable was available.")
+        Write-RunLog "Discord delivery skipped: no endpoint was available."
         return
     }
 
@@ -2761,116 +3448,79 @@ function Send-DiscordWebhook {
     }
 
     $payloadJson = $Payload | ConvertTo-Json -Depth 10
-    $attachmentCount = $script:DiscordAttachments.Count
-    $script:DiscordAttachmentCount = $attachmentCount
-    Write-RunLog "Discord send starting with $attachmentCount attachment(s), timeout $DiscordTimeoutSeconds second(s)."
+    $attachments = @($script:DiscordAttachments)
+    $batches = @(Get-DiscordAttachmentBatches -Attachments $attachments)
+    $script:DiscordAttachmentCount = $attachments.Count
+    Write-RunLog "Discord delivery starting via $($target.Kind) with $($attachments.Count) attachment(s), $($batches.Count) batch(es), timeout $DiscordTimeoutSeconds second(s)."
 
-    if ($attachmentCount -eq 0) {
-        $jsonClient = $null
-        $jsonContent = $null
+    if ($DiscordDebug) {
+        Write-DiscordDebugArtifacts -PayloadJson $payloadJson -Target $target -Batches $batches
+        return
+    }
+
+    if ($attachments.Count -eq 0 -or $batches.Count -eq 0) {
         try {
-            Add-Type -AssemblyName System.Net.Http
-            $jsonClient = New-Object System.Net.Http.HttpClient
-            $jsonClient.Timeout = [TimeSpan]::FromSeconds($DiscordTimeoutSeconds)
-            $jsonContent = New-Object System.Net.Http.StringContent($payloadJson, [Text.Encoding]::UTF8, "application/json")
-            $jsonResponse = $jsonClient.PostAsync($resolvedWebhookUrl, $jsonContent).GetAwaiter().GetResult()
-            if (-not $jsonResponse.IsSuccessStatusCode) {
-                $responseText = $jsonResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-                throw "Discord returned HTTP $([int]$jsonResponse.StatusCode): $responseText"
-            }
-
-            $script:DiscordStatus = "sent_embed_only"
+            Invoke-DiscordJsonPost -Target $target -PayloadJson $payloadJson
+            $script:DiscordStatus = "sent_embed_only_$($target.Kind)"
             $script:Report.Add("")
-            $script:Report.Add("Discord webhook sent without attachments.")
-            Write-RunLog "Discord webhook sent without attachments."
+            $script:Report.Add("Discord delivery sent without attachments via $($target.Kind).")
+            Write-RunLog "Discord delivery sent without attachments via $($target.Kind)."
             return
         }
         catch {
             $script:DiscordStatus = "failed"
             $script:Report.Add("")
-            $script:Report.Add("Discord webhook failed: $($_.Exception.Message)")
-            Write-RunLog "Discord webhook failed: $($_.Exception.Message)"
+            $script:Report.Add("Discord delivery failed via $($target.Kind): $($_.Exception.Message)")
+            Write-RunLog "Discord delivery failed via $($target.Kind): $($_.Exception.Message)"
             return
         }
-        finally {
-            if ($jsonContent) { $jsonContent.Dispose() }
-            if ($jsonClient) { $jsonClient.Dispose() }
-        }
     }
 
-    $multipartError = $null
-    try {
-        Add-Type -AssemblyName System.Net.Http
+    $sentFiles = 0
+    $batchIndex = 1
+    foreach ($batch in $batches) {
+        $batchPayload = Build-DiscordBatchPayload -OriginalPayload $Payload -BatchIndex $batchIndex -BatchCount $batches.Count
+        $batchPayloadJson = $batchPayload | ConvertTo-Json -Depth 10
 
-        $client = New-Object System.Net.Http.HttpClient
-        $client.Timeout = [TimeSpan]::FromSeconds($DiscordTimeoutSeconds)
-        $multipart = New-Object System.Net.Http.MultipartFormDataContent
+        try {
+            $sentInBatch = Invoke-DiscordMultipartPost -Target $target -PayloadJson $batchPayloadJson -Attachments $batch.Attachments
+            $sentFiles += $sentInBatch
+            Write-RunLog "Discord delivery batch $batchIndex/$($batches.Count) sent via $($target.Kind) with $sentInBatch attachment(s)."
+        }
+        catch {
+            $multipartError = $_.Exception.Message
+            $script:Report.Add("")
+            $script:Report.Add("Discord delivery multipart batch $batchIndex/$($batches.Count) failed via $($target.Kind): $multipartError")
+            Write-RunLog "Discord multipart batch $batchIndex/$($batches.Count) failed via $($target.Kind): $multipartError"
 
-        $payloadContent = New-Object System.Net.Http.StringContent($payloadJson, [Text.Encoding]::UTF8, "application/json")
-        $multipart.Add($payloadContent, "payload_json")
-
-        $index = 0
-        foreach ($attachment in $script:DiscordAttachments) {
-            if (-not $attachment -or -not $attachment.FileName) { continue }
-
-            $bytes = if ($attachment.Bytes) { [byte[]]$attachment.Bytes } else { [Text.Encoding]::UTF8.GetBytes([string]$attachment.Content) }
-            $fileContent = New-Object -TypeName System.Net.Http.ByteArrayContent -ArgumentList (,$bytes)
-            if ($attachment.ContentType) {
-                $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse([string]$attachment.ContentType)
+            if ($sentFiles -gt 0) {
+                $script:DiscordStatus = "sent_partial_attachments_$($target.Kind)"
+                $script:Report.Add("Discord delivery stopped after partial attachment delivery: $sentFiles file(s) sent.")
+                return
             }
-            $multipart.Add($fileContent, "files[$index]", [string]$attachment.FileName)
-            $index++
+
+            try {
+                Invoke-DiscordJsonPost -Target $target -PayloadJson $payloadJson
+                $script:DiscordStatus = "sent_embed_only_after_attachment_failure_$($target.Kind)"
+                $script:Report.Add("Discord delivery fallback sent embed only; attachments were not delivered.")
+                Write-RunLog "Discord fallback sent embed only after attachment failure."
+                return
+            }
+            catch {
+                $script:DiscordStatus = "failed"
+                $script:Report.Add("Discord delivery fallback failed via $($target.Kind): $($_.Exception.Message)")
+                Write-RunLog "Discord fallback failed via $($target.Kind): $($_.Exception.Message)"
+                return
+            }
         }
 
-        $response = $client.PostAsync($resolvedWebhookUrl, $multipart).GetAwaiter().GetResult()
-        if (-not $response.IsSuccessStatusCode) {
-            $responseText = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-            throw "Discord returned HTTP $([int]$response.StatusCode): $responseText"
-        }
-
-        $script:DiscordStatus = "sent_with_attachments"
-        $script:Report.Add("")
-        $script:Report.Add("Discord webhook sent with $index attachment(s).")
-        Write-RunLog "Discord webhook sent with $index attachment(s)."
-        return
-    }
-    catch {
-        $multipartError = $_.Exception.Message
-        $script:Report.Add("")
-        $script:Report.Add("Discord webhook multipart failed: $multipartError")
-        Write-RunLog "Discord multipart send failed: $multipartError"
-    }
-    finally {
-        if ($multipart) { $multipart.Dispose() }
-        if ($client) { $client.Dispose() }
+        $batchIndex++
     }
 
-    $fallbackClient = $null
-    $fallbackContent = $null
-    try {
-        Add-Type -AssemblyName System.Net.Http
-        $fallbackClient = New-Object System.Net.Http.HttpClient
-        $fallbackClient.Timeout = [TimeSpan]::FromSeconds($DiscordTimeoutSeconds)
-        $fallbackContent = New-Object System.Net.Http.StringContent($payloadJson, [Text.Encoding]::UTF8, "application/json")
-        $fallbackResponse = $fallbackClient.PostAsync($resolvedWebhookUrl, $fallbackContent).GetAwaiter().GetResult()
-        if (-not $fallbackResponse.IsSuccessStatusCode) {
-            $fallbackText = $fallbackResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-            throw "Discord returned HTTP $([int]$fallbackResponse.StatusCode): $fallbackText"
-        }
-
-        $script:DiscordStatus = "sent_embed_only_after_attachment_failure"
-        $script:Report.Add("Discord webhook fallback sent embed only; attachments were not delivered.")
-        Write-RunLog "Discord fallback sent embed only after attachment failure."
-    }
-    catch {
-        $script:DiscordStatus = "failed"
-        $script:Report.Add("Discord webhook fallback failed: $($_.Exception.Message)")
-        Write-RunLog "Discord fallback failed: $($_.Exception.Message)"
-    }
-    finally {
-        if ($fallbackContent) { $fallbackContent.Dispose() }
-        if ($fallbackClient) { $fallbackClient.Dispose() }
-    }
+    $script:DiscordStatus = "sent_with_attachments_$($target.Kind)"
+    $script:Report.Add("")
+    $script:Report.Add("Discord delivery sent with $sentFiles attachment(s) across $($batches.Count) batch(es) via $($target.Kind).")
+    Write-RunLog "Discord delivery sent with $sentFiles attachment(s) across $($batches.Count) batch(es) via $($target.Kind)."
 }
 
 function Build-DiscordArtifacts {
@@ -2893,6 +3543,19 @@ function Build-DiscordArtifacts {
     if ($EnableBrowserHistoryScan) {
         Add-DiscordAttachment -FileName $script:FilteredHistoryFileName -Lines $historyLines -ContentType "text/plain; charset=utf-8" -LocalPath $script:FilteredHistoryPath
     }
+
+    if ($script:ScreenshotCapturePath -and [System.IO.File]::Exists($script:ScreenshotCapturePath)) {
+        try {
+            $screenshotBytes = [System.IO.File]::ReadAllBytes($script:ScreenshotCapturePath)
+            Add-DiscordAttachment -FileName $script:ScreenshotCaptureFileName -Bytes $screenshotBytes -ContentType $script:ScreenshotCaptureContentType
+            Write-RunLog "Overlay screenshot added to Discord attachments: $script:ScreenshotCaptureFileName ($($screenshotBytes.Length) bytes)."
+        }
+        catch {
+            Write-RunLog "Overlay screenshot attachment failed: $($_.Exception.Message)"
+            $script:Report.Add("Overlay screenshot attachment failed: $($_.Exception.Message)")
+        }
+    }
+
     $script:DiscordAttachmentCount = $script:DiscordAttachments.Count
     Write-RunLog "Discord artifacts built: $($script:DiscordAttachments.Count) attachment(s)."
 }
