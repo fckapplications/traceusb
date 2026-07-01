@@ -63,6 +63,14 @@ Describe "TraceUSB forensic analyzer" {
         $scriptText | Should Match 'WScript\.Shell'
     }
 
+    It "shows live progress by default with an opt-out switch" {
+        $scriptText = Get-Content -Raw -LiteralPath $scriptPath
+        $scriptText | Should Match 'NoProgress'
+        $scriptText | Should Match 'Write-Progress'
+        $scriptText | Should Match 'Invoke-TraceStage'
+        $scriptText | Should Match 'TraceUSB concluido em'
+    }
+
     It "can build Discord relay debug artifacts without sending HTTP" {
         $outputDir = Join-Path $TestDrive "relay-debug"
         New-Item -ItemType Directory -Path $outputDir -Force | Out-Null

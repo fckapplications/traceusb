@@ -16,6 +16,7 @@
 - `-GameSessionDate` and `-DisableGameSessionAnalysis` controls.
 - Memory-only output by default: final reports, run logs, hashes, and case ZIP are prepared as Discord attachments without writing local files.
 - `-SaveLocalArtifacts` for explicit operator/local debugging output.
+- Live PowerShell progress bar with elapsed time per phase, plus `-NoProgress` to suppress it.
 
 ### Changed
 - Removed the real Discord webhook URL from script defaults; public builds use the team relay URL instead.

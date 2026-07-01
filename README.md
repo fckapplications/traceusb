@@ -317,7 +317,8 @@ Customize game/session anchors:
 | `-DiscordMaxPayloadBytes` | `24000000` | Approximate total attachment bytes per Discord/relay request |
 | `-DiscordMaxFilesPerMessage` | `10` | Maximum files per Discord/relay request before batching |
 | `-DiscordSelfTest` | Off | Sends a small non-forensic test embed and attachment, then exits |
-| `-VerboseConsole` | Off | Prints progress lines, useful for `irm ... \| iex` runs |
+| `-VerboseConsole` | Off | Prints detailed run-log lines, useful for `irm ... \| iex` diagnostics |
+| `-NoProgress` | Off | Disables the live PowerShell progress bar |
 | `-DiscordAlertColor` | `D64545` | Embed border color for high confidence |
 | `-DiscordNoticeColor` | `E0A33A` | Embed border color for medium confidence |
 | `-DiscordInfoColor` | `4E7DD9` | Embed border color for low/context-only findings |
@@ -375,7 +376,8 @@ Discord delivery uses an explicit timeout, forces TLS 1.2 where supported, and
 splits attachments into batches when file count or payload size crosses the
 configured limits. If the first multipart upload fails, TraceUSB falls back to
 sending the embed only and prints the degraded/failed status in the console.
-Use `-VerboseConsole` for live progress lines.
+The script shows a live PowerShell progress bar by default; use `-NoProgress`
+to suppress it or `-VerboseConsole` to add detailed run-log lines.
 
 For review before posting, use `-DiscordPreviewPath`; this writes:
 

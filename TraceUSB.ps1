@@ -79,6 +79,8 @@ param(
 
     [switch]$VerboseConsole,
 
+    [switch]$NoProgress,
+
     [string]$DiscordAlertColor = "D64545",
 
     [string]$DiscordNoticeColor = "E0A33A",
@@ -237,6 +239,11 @@ $script:ScreenshotCapturePath = $null
 $script:ScreenshotCaptureFileName = $null
 $script:ScreenshotCaptureContentType = $null
 $script:PortableSQLiteTempRoot = $null
+$script:TraceProgressEnabled = -not $NoProgress
+$script:TraceProgressActivity = "TraceUSB forensic analyzer"
+$script:TraceProgressStartedAt = Get-Date
+$script:TraceProgressStageStartedAt = $script:TraceProgressStartedAt
+$script:TraceProgressCompleted = $false
 $script:Correlation = @{}
 $script:GameSessionTimes = New-Object System.Collections.Generic.List[datetime]
 $script:UsbTimes = New-Object System.Collections.Generic.List[datetime]
@@ -300,9 +307,124 @@ function Write-RunLogFile {
     Set-Content -LiteralPath $script:RunLogPath -Value $script:RunLog -Encoding UTF8
 }
 
+function Format-ProgressDuration {
+    param([TimeSpan]$Duration)
+
+    if (-not $Duration) { return "00s" }
+    if ($Duration.TotalHours -ge 1) {
+        return "{0:00}h{1:00}m{2:00}s" -f [int]$Duration.TotalHours, $Duration.Minutes, $Duration.Seconds
+    }
+    if ($Duration.TotalMinutes -ge 1) {
+        return "{0:00}m{1:00}s" -f [int]$Duration.TotalMinutes, $Duration.Seconds
+    }
+    return "{0:00}s" -f [Math]::Max(0, [int]$Duration.TotalSeconds)
+}
+
+function Get-TraceElapsedText {
+    return (Format-ProgressDuration -Duration ((Get-Date) - $script:TraceProgressStartedAt))
+}
+
+function Limit-ProgressPercent {
+    param([int]$Percent)
+
+    if ($Percent -lt 0) { return 0 }
+    if ($Percent -gt 100) { return 100 }
+    return $Percent
+}
+
+function Update-TraceProgress {
+    param(
+        [string]$Stage,
+        [int]$PercentComplete,
+        [string]$Status
+    )
+
+    if (-not $script:TraceProgressEnabled) { return }
+
+    $elapsed = Get-TraceElapsedText
+    $percent = Limit-ProgressPercent -Percent $PercentComplete
+    $statusText = if ($Status) {
+        "[{0}] {1} - {2}" -f $elapsed, $Stage, $Status
+    }
+    else {
+        "[{0}] {1}" -f $elapsed, $Stage
+    }
+
+    try {
+        Write-Progress -Activity $script:TraceProgressActivity -Status $statusText -PercentComplete $percent
+    }
+    catch {
+        $script:TraceProgressEnabled = $false
+    }
+}
+
+function Start-TraceProgress {
+    $script:TraceProgressStartedAt = Get-Date
+    $script:TraceProgressStageStartedAt = $script:TraceProgressStartedAt
+    $script:TraceProgressCompleted = $false
+    Update-TraceProgress -Stage "Inicializando" -PercentComplete 1 -Status "preparando coleta"
+    Write-RunLog "Progress started."
+}
+
+function Start-TraceStage {
+    param(
+        [string]$Name,
+        [int]$PercentComplete
+    )
+
+    $script:TraceProgressStageStartedAt = Get-Date
+    Update-TraceProgress -Stage $Name -PercentComplete $PercentComplete -Status "em andamento"
+    Write-RunLog "Stage started: $Name"
+}
+
+function Complete-TraceStage {
+    param(
+        [string]$Name,
+        [int]$PercentComplete
+    )
+
+    $stageElapsed = Format-ProgressDuration -Duration ((Get-Date) - $script:TraceProgressStageStartedAt)
+    Update-TraceProgress -Stage $Name -PercentComplete $PercentComplete -Status "concluido em $stageElapsed"
+    Write-RunLog "Stage completed: $Name in $stageElapsed"
+}
+
+function Invoke-TraceStage {
+    param(
+        [string]$Name,
+        [int]$StartPercent,
+        [int]$EndPercent,
+        [scriptblock]$ScriptBlock
+    )
+
+    Start-TraceStage -Name $Name -PercentComplete $StartPercent
+    try {
+        & $ScriptBlock
+    }
+    finally {
+        Complete-TraceStage -Name $Name -PercentComplete $EndPercent
+    }
+}
+
+function Complete-TraceProgress {
+    if ($script:TraceProgressCompleted) { return }
+
+    $script:TraceProgressCompleted = $true
+    Update-TraceProgress -Stage "Concluido" -PercentComplete 100 -Status "tempo total $(Get-TraceElapsedText)"
+    Start-Sleep -Milliseconds 150
+    if ($script:TraceProgressEnabled) {
+        try {
+            Write-Progress -Activity $script:TraceProgressActivity -Completed
+        }
+        catch {
+            $script:TraceProgressEnabled = $false
+        }
+    }
+    Write-RunLog "Progress completed in $(Get-TraceElapsedText)."
+}
+
 function Write-ConsoleSummary {
     Write-Host ""
-    Write-Host "TraceUSB concluido."
+    Write-Host "TraceUSB concluido em $(Get-TraceElapsedText)."
     if ($SaveLocalArtifacts -and [System.IO.File]::Exists($script:ReportPath)) {
         Write-Host "Analise: $script:ReportPath"
     }
@@ -4785,44 +4907,96 @@ function Invoke-DiscordSelfTest {
     Send-DiscordWebhook -Payload $payload
     Write-RunLog "Discord self-test finished with status $script:DiscordStatus."
     Write-RunLogFile
-    Write-ConsoleSummary
 }
 
 Write-RunLog "TraceUSB started. LookbackHours=$LookbackHours OutputDirectory=$script:OutputDirectory."
+Start-TraceProgress
 
-if ($SaveDiscordWebhookSecret) {
-    Ensure-OutputDirectory
-    Write-RunLog "Saving Discord webhook secret with DPAPI."
-    Save-DiscordWebhookSecret
-    Write-RunLog "Discord webhook secret save flow finished."
-    Write-RunLogFile
-    return
+$script:WriteFinalConsoleSummary = $false
+
+try {
+    if ($SaveDiscordWebhookSecret) {
+        Invoke-TraceStage -Name "Salvando segredo do Discord" -StartPercent 10 -EndPercent 100 -ScriptBlock {
+            Ensure-OutputDirectory
+            Write-RunLog "Saving Discord webhook secret with DPAPI."
+            Save-DiscordWebhookSecret
+            Write-RunLog "Discord webhook secret save flow finished."
+            Write-RunLogFile
+        }
+    }
+    elseif ($DiscordSelfTest) {
+        Invoke-TraceStage -Name "Testando envio Discord" -StartPercent 10 -EndPercent 100 -ScriptBlock {
+            Invoke-DiscordSelfTest
+        }
+        $script:WriteFinalConsoleSummary = $true
+    }
+    else {
+        Invoke-TraceStage -Name "Coletando contexto do sistema" -StartPercent 3 -EndPercent 8 -ScriptBlock {
+            Collect-SystemContext
+        }
+        Invoke-TraceStage -Name "Preparando auditoria opcional" -StartPercent 8 -EndPercent 10 -ScriptBlock {
+            Enable-ProcessAuditPolicy
+        }
+        Invoke-TraceStage -Name "Verificando limpeza de logs" -StartPercent 10 -EndPercent 16 -ScriptBlock {
+            Collect-LogClearingEvents
+        }
+        Invoke-TraceStage -Name "Coletando historico USB" -StartPercent 16 -EndPercent 24 -ScriptBlock {
+            Collect-UsbEvents
+        }
+        Invoke-TraceStage -Name "Coletando eventos do Defender" -StartPercent 24 -EndPercent 31 -ScriptBlock {
+            Collect-DefenderEvents
+        }
+        Invoke-TraceStage -Name "Coletando execucoes de processos" -StartPercent 31 -EndPercent 41 -ScriptBlock {
+            Collect-ProcessEvents
+        }
+        Invoke-TraceStage -Name "Analisando Prefetch" -StartPercent 41 -EndPercent 49 -ScriptBlock {
+            Collect-PrefetchEvents
+        }
+        Invoke-TraceStage -Name "Analisando BAM" -StartPercent 49 -EndPercent 57 -ScriptBlock {
+            Collect-BamEvents
+        }
+        Invoke-TraceStage -Name "Analisando servicos e drivers" -StartPercent 57 -EndPercent 64 -ScriptBlock {
+            Collect-ServiceEvents
+        }
+        Invoke-TraceStage -Name "Reconstruindo sessao SCUM/BattlEye" -StartPercent 64 -EndPercent 72 -ScriptBlock {
+            Collect-GameSessionActivity
+        }
+        Invoke-TraceStage -Name "Verificando runtimes e overlays" -StartPercent 72 -EndPercent 77 -ScriptBlock {
+            Collect-RuntimeContext
+        }
+        Invoke-TraceStage -Name "Analisando contexto de rede" -StartPercent 77 -EndPercent 82 -ScriptBlock {
+            Collect-NetworkAnomalies
+        }
+        Invoke-TraceStage -Name "Correlacionando evidencias" -StartPercent 82 -EndPercent 87 -ScriptBlock {
+            Complete-Correlation
+        }
+        if ($EnableScreenshotTrigger) {
+            Invoke-TraceStage -Name "Capturando screenshot via overlay" -StartPercent 87 -EndPercent 91 -ScriptBlock {
+                Invoke-ScreenshotTrigger
+            }
+        }
+        else {
+            Update-TraceProgress -Stage "Captura via overlay" -PercentComplete 91 -Status "desativada"
+            Write-RunLog "Stage skipped: Capturando screenshot via overlay."
+        }
+        Invoke-TraceStage -Name "Montando anexos e enviando Discord" -StartPercent 91 -EndPercent 99 -ScriptBlock {
+            Write-Outputs
+        }
+
+        if ($SaveLocalArtifacts -and -not $NoOpen) {
+            Invoke-TraceStage -Name "Abrindo relatorios locais" -StartPercent 99 -EndPercent 100 -ScriptBlock {
+                Start-Process notepad.exe $script:ReportPath
+                Start-Process notepad.exe $script:TimelinePath
+            }
+        }
+
+        $script:WriteFinalConsoleSummary = $true
+    }
+}
+finally {
+    Complete-TraceProgress
 }
 
-if ($DiscordSelfTest) {
-    Invoke-DiscordSelfTest
-    return
+if ($script:WriteFinalConsoleSummary) {
+    Write-ConsoleSummary
 }
-
-Collect-SystemContext
-Enable-ProcessAuditPolicy
-Collect-LogClearingEvents
-Collect-UsbEvents
-Collect-DefenderEvents
-Collect-ProcessEvents
-Collect-PrefetchEvents
-Collect-BamEvents
-Collect-ServiceEvents
-Collect-GameSessionActivity
-Collect-RuntimeContext
-Collect-NetworkAnomalies
-Complete-Correlation
-Invoke-ScreenshotTrigger
-Write-Outputs
-
-if ($SaveLocalArtifacts -and -not $NoOpen) {
-    Start-Process notepad.exe $script:ReportPath
-    Start-Process notepad.exe $script:TimelinePath
-}
-
-Write-ConsoleSummary
