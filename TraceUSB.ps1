@@ -27,6 +27,12 @@ param(
     [ValidateRange(1, 10)]
     [int]$ScreenshotFocusAttempts = 3,
 
+    [ValidateSet("Auto", "NVIDIA", "AMD")]
+    [string]$ScreenshotOverlayProvider = "Auto",
+
+    [ValidateRange(1, 3)]
+    [int]$ScreenshotHotkeyAttempts = 2,
+
     [ValidateRange(1, 60)]
     [int]$ScreenshotPostTriggerWaitSeconds = 8,
 
@@ -2214,16 +2220,21 @@ function Get-OverlayScreenshotRoots {
     }
 
     if ($env:USERPROFILE) {
+        Add-RootIfPresent (Join-Path $env:USERPROFILE "Videos")
         Add-RootIfPresent (Join-Path $env:USERPROFILE "Videos\Captures")
         Add-RootIfPresent (Join-Path $env:USERPROFILE "Videos\NVIDIA")
         Add-RootIfPresent (Join-Path $env:USERPROFILE "Videos\NVIDIA Share")
+        Add-RootIfPresent (Join-Path $env:USERPROFILE "Videos\NVIDIA Highlights")
         Add-RootIfPresent (Join-Path $env:USERPROFILE "Videos\Radeon ReLive")
+        Add-RootIfPresent (Join-Path $env:USERPROFILE "Pictures")
         Add-RootIfPresent (Join-Path $env:USERPROFILE "Pictures\Screenshots")
         Add-RootIfPresent (Join-Path $env:USERPROFILE "Pictures\NVIDIA Share")
     }
 
     if ($env:OneDrive) {
+        Add-RootIfPresent (Join-Path $env:OneDrive "Pictures")
         Add-RootIfPresent (Join-Path $env:OneDrive "Pictures\Screenshots")
+        Add-RootIfPresent (Join-Path $env:OneDrive "Videos")
         Add-RootIfPresent (Join-Path $env:OneDrive "Videos\Captures")
     }
 
@@ -2238,6 +2249,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 public static class TraceUsbWindowApi
 {
@@ -2297,7 +2309,11 @@ public static class TraceUsbWindowApi
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_SHOWWINDOW = 0x0040;
+    private const byte VK_CONTROL = 0x11;
+    private const byte VK_SHIFT = 0x10;
     private const byte VK_MENU = 0x12;
+    private const byte VK_F1 = 0x70;
+    private const byte VK_I = 0x49;
     private const uint KEYEVENTF_KEYUP = 0x0002;
 
     public static int GetWindowProcessId(IntPtr hWnd)
@@ -2389,6 +2405,38 @@ public static class TraceUsbWindowApi
         }
 
         return GetWindowProcessId(GetForegroundWindow()) == (int)targetPid;
+    }
+
+    public static void SendNvidiaScreenshotHotkey()
+    {
+        SendKeyCombo(new byte[] { VK_MENU, VK_F1 }, 80);
+    }
+
+    public static void SendAmdScreenshotHotkey()
+    {
+        SendKeyCombo(new byte[] { VK_CONTROL, VK_SHIFT, VK_I }, 80);
+    }
+
+    public static void SendKeyCombo(byte[] virtualKeys, int holdMilliseconds)
+    {
+        if (virtualKeys == null || virtualKeys.Length == 0) return;
+
+        foreach (byte key in virtualKeys)
+        {
+            keybd_event(key, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(15);
+        }
+
+        if (holdMilliseconds > 0)
+        {
+            Thread.Sleep(holdMilliseconds);
+        }
+
+        for (int index = virtualKeys.Length - 1; index >= 0; index--)
+        {
+            keybd_event(virtualKeys[index], 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            Thread.Sleep(15);
+        }
     }
 }
 "@
@@ -2578,6 +2626,61 @@ function Wait-ScreenshotManualFocusCountdown {
     }
 }
 
+function Resolve-ScreenshotOverlayTarget {
+    param([string[]]$RuntimeSources)
+
+    if ($ScreenshotOverlayProvider -eq "NVIDIA") {
+        return [PSCustomObject]@{
+            Source = "NVIDIA"
+            Label  = "ALT+F1"
+            Reason = "forced by -ScreenshotOverlayProvider"
+        }
+    }
+
+    if ($ScreenshotOverlayProvider -eq "AMD") {
+        return [PSCustomObject]@{
+            Source = "AMD"
+            Label  = "CTRL+SHIFT+I"
+            Reason = "forced by -ScreenshotOverlayProvider"
+        }
+    }
+
+    if ($RuntimeSources -contains "NVIDIA") {
+        return [PSCustomObject]@{
+            Source = "NVIDIA"
+            Label  = "ALT+F1"
+            Reason = "NVIDIA runtime context observed"
+        }
+    }
+
+    if ($RuntimeSources -contains "AMD") {
+        return [PSCustomObject]@{
+            Source = "AMD"
+            Label  = "CTRL+SHIFT+I"
+            Reason = "AMD runtime context observed"
+        }
+    }
+
+    return [PSCustomObject]@{
+        Source = "NVIDIA"
+        Label  = "ALT+F1"
+        Reason = "no NVIDIA/AMD runtime was observed; trying NVIDIA default hotkey because screenshot trigger was explicitly enabled"
+    }
+}
+
+function Invoke-OverlayScreenshotHotkey {
+    param($Target)
+
+    Ensure-WindowApi
+
+    if ($Target.Source -eq "AMD") {
+        [TraceUsbWindowApi]::SendAmdScreenshotHotkey()
+        return
+    }
+
+    [TraceUsbWindowApi]::SendNvidiaScreenshotHotkey()
+}
+
 function Invoke-ScreenshotTrigger {
     if (-not $EnableScreenshotTrigger) { return }
 
@@ -2588,28 +2691,9 @@ function Invoke-ScreenshotTrigger {
 
     $runtimeEvidence = @($script:Evidence | Where-Object { $_.Category -eq "RuntimeContext" })
     $runtimeSources = @($runtimeEvidence | ForEach-Object { $_.Source } | Select-Object -Unique)
-    $target = $null
-
-    if ($runtimeSources -contains "NVIDIA") {
-        $target = [PSCustomObject]@{
-            Source = "NVIDIA"
-            Hotkey = "%{F1}"
-            Label  = "ALT+F1"
-        }
-    }
-    elseif ($runtimeSources -contains "AMD") {
-        $target = [PSCustomObject]@{
-            Source = "AMD"
-            Hotkey = "^+i"
-            Label  = "CTRL+SHIFT+I"
-        }
-    }
-
-    if (-not $target) {
-        $script:Report.Add("Screenshot trigger skipped: no NVIDIA or AMD overlay runtime context was observed.")
-        Add-Evidence -Time (Get-Date) -Category "RuntimeContext" -Source "ScreenshotTrigger" -Confidence 10 -Reasons @("Screenshot trigger enabled but no supported GPU overlay runtime was observed") -Details "No NVIDIA/AMD runtime context" | Out-Null
-        return
-    }
+    $target = Resolve-ScreenshotOverlayTarget -RuntimeSources $runtimeSources
+    $script:Report.Add("Screenshot overlay target: $($target.Source) $($target.Label) ($($target.Reason)).")
+    Write-RunLog "Screenshot overlay target resolved: $($target.Source) $($target.Label). Reason: $($target.Reason)."
 
     $roots = @(Get-OverlayScreenshotRoots)
     if ($roots.Count -gt 0) {
@@ -2623,7 +2707,6 @@ function Invoke-ScreenshotTrigger {
     }
 
     try {
-        Add-Type -AssemblyName System.Windows.Forms
         $focusSucceeded = Set-ScreenshotTargetWindowFocus
         if ($focusSucceeded) {
             Start-Sleep -Seconds $ScreenshotFocusWaitSeconds
@@ -2632,13 +2715,23 @@ function Invoke-ScreenshotTrigger {
             Wait-ScreenshotManualFocusCountdown
         }
 
-        $triggerTime = Get-Date
-        [System.Windows.Forms.SendKeys]::SendWait([string]$target.Hotkey)
-        $script:Report.Add("$($target.Source) screenshot hotkey sent: $($target.Label).")
-        Write-RunLog "$($target.Source) screenshot hotkey sent: $($target.Label)."
+        $captured = $null
+        for ($attempt = 1; $attempt -le $ScreenshotHotkeyAttempts; $attempt++) {
+            $triggerTime = Get-Date
 
-        Start-Sleep -Seconds $ScreenshotPostTriggerWaitSeconds
-        $captured = Find-NewOverlayScreenshot -Since $triggerTime -Roots $roots
+            Invoke-OverlayScreenshotHotkey -Target $target
+            $script:Report.Add("$($target.Source) screenshot hotkey sent via native keyboard event: $($target.Label) (attempt $attempt/$ScreenshotHotkeyAttempts).")
+            Write-RunLog "$($target.Source) screenshot hotkey sent via native keyboard event: $($target.Label) attempt $attempt/$ScreenshotHotkeyAttempts."
+
+            Start-Sleep -Seconds $ScreenshotPostTriggerWaitSeconds
+            $captured = Find-NewOverlayScreenshot -Since $triggerTime -Roots $roots
+            if ($captured) { break }
+
+            if ($attempt -lt $ScreenshotHotkeyAttempts) {
+                $script:Report.Add("No overlay screenshot detected after attempt $attempt; retrying hotkey once more.")
+                Write-RunLog "No overlay screenshot detected after hotkey attempt $attempt; retrying."
+            }
+        }
 
         if ($captured) {
             $extension = [System.IO.Path]::GetExtension($captured.FullName)
@@ -2648,16 +2741,16 @@ function Invoke-ScreenshotTrigger {
             $script:ScreenshotCaptureFileName = "overlay_screenshot_$($script:ArtifactSuffix)$extension"
             $script:ScreenshotCaptureContentType = Get-ImageContentType -Path $captured.FullName
 
-            $details = "$($target.Source) $($target.Label) trigger sent; new screenshot detected at $($captured.FullName)"
+            $details = "$($target.Source) $($target.Label) native trigger sent; new screenshot detected at $($captured.FullName)"
             Add-Evidence -Time (Get-Date) -Category "RuntimeContext" -Source $target.Source -Confidence 25 -Reasons @("Operator enabled screenshot trigger", "Overlay screenshot file was detected after hotkey") -Details $details | Out-Null
             $script:Report.Add("Overlay screenshot detected and queued for Discord/case bundle: $($script:ScreenshotCaptureFileName)")
             Write-RunLog "Overlay screenshot detected: $($captured.FullName)"
         }
         else {
-            $details = "$($target.Source) $($target.Label) trigger sent; no new screenshot file detected in known folders"
+            $details = "$($target.Source) $($target.Label) native trigger sent $ScreenshotHotkeyAttempts time(s); no new screenshot file detected in known folders"
             Add-Evidence -Time (Get-Date) -Category "RuntimeContext" -Source $target.Source -Confidence 15 -Reasons @("Operator enabled screenshot trigger", "No overlay screenshot file was detected after hotkey") -Details $details | Out-Null
-            $script:Report.Add("No new overlay screenshot file was detected after the hotkey.")
-            Write-RunLog "No overlay screenshot file detected after trigger."
+            $script:Report.Add("No new overlay screenshot file was detected after the hotkey attempts.")
+            Write-RunLog "No overlay screenshot file detected after $ScreenshotHotkeyAttempts hotkey attempt(s)."
         }
     }
     catch {

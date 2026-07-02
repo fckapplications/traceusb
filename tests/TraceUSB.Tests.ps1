@@ -66,6 +66,16 @@ Describe "TraceUSB forensic analyzer" {
         $scriptText | Should Match 'WScript\.Shell'
     }
 
+    It "uses native overlay hotkeys and retries screenshot detection" {
+        $scriptText = Get-Content -Raw -LiteralPath $scriptPath
+        $scriptText | Should Match 'ScreenshotOverlayProvider'
+        $scriptText | Should Match 'ScreenshotHotkeyAttempts'
+        $scriptText | Should Match 'SendNvidiaScreenshotHotkey'
+        $scriptText | Should Match 'SendAmdScreenshotHotkey'
+        $scriptText | Should Match 'native keyboard event'
+        $scriptText | Should Not Match 'System\.Windows\.Forms\.SendKeys'
+    }
+
     It "shows live progress by default with an opt-out switch" {
         $scriptText = Get-Content -Raw -LiteralPath $scriptPath
         $scriptText | Should Match 'NoProgress'

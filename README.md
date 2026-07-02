@@ -295,6 +295,8 @@ Customize game/session anchors:
 | `-DisableScreenshotWindowFocus` | Off | Compatibility switch that forces the manual foreground countdown |
 | `-ScreenshotFocusWaitSeconds` | `3` | Wait after experimental automatic SCUM focus before sending the overlay hotkey |
 | `-ScreenshotFocusAttempts` | `3` | Number of experimental foreground-focus attempts before falling back to the manual countdown |
+| `-ScreenshotOverlayProvider` | `Auto` | Overlay provider for screenshot hotkey: `Auto`, `NVIDIA`, or `AMD` |
+| `-ScreenshotHotkeyAttempts` | `2` | Number of native hotkey attempts before giving up on overlay screenshot detection |
 | `-ScreenshotPostTriggerWaitSeconds` | `8` | Wait after hotkey before scanning for a new screenshot file |
 | `-IncludeLowConfidence` | Off | Includes low/context evidence in the readable report |
 | `-EnableDiscordWebhook` | On | Sends a Discord embed when a relay or webhook endpoint is configured |
@@ -437,9 +439,9 @@ client never receives the real Discord URL.
 
 `-EnableScreenshotTrigger` is designed for consent-based review when the game is
 running. By default, TraceUSB does not try to force the SCUM window into focus.
-It gives a short manual foreground countdown, then sends the detected GPU
-overlay screenshot hotkey and looks for a newly created NVIDIA/AMD screenshot
-file.
+It gives a short manual foreground countdown, then sends the GPU overlay
+screenshot hotkey through a native keyboard event and looks for a newly created
+NVIDIA/AMD screenshot file.
 
 This path intentionally favors NVIDIA/AMD overlay screenshots because those
 capture paths can include game-layer visuals that ordinary desktop sharing or
@@ -450,6 +452,12 @@ instead of silently substituting a lower-value desktop capture.
 AMD support uses the default Radeon screenshot hotkey and the common Radeon
 ReLive screenshot folder. Because AMD overlay configuration varies more between
 driver versions, verify it with a collaborator before relying on it operationally.
+Use `-ScreenshotOverlayProvider AMD` to force the AMD hotkey during those tests.
+
+When automatic runtime detection does not observe NVIDIA or AMD but
+`-EnableScreenshotTrigger` is explicitly enabled, TraceUSB tries the NVIDIA
+default `ALT+F1` hotkey instead of skipping the screenshot path. This keeps the
+one-command player flow useful on systems where overlay process names vary.
 
 `-EnableScreenshotWindowFocus` keeps the experimental automatic focus path
 available for controlled testing, but the manual countdown is the operational

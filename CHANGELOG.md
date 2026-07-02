@@ -12,6 +12,7 @@
 - SHA256 validation for bundled/downloaded SQLite tooling.
 - NVIDIA/AMD overlay screenshot detection after `-EnableScreenshotTrigger`, with the captured image queued as a Discord/case-bundle attachment when found.
 - Manual foreground countdown before the GPU overlay screenshot hotkey, with experimental automatic focus available through `-EnableScreenshotWindowFocus`.
+- Native keyboard-event screenshot hotkey delivery with `-ScreenshotOverlayProvider` and `-ScreenshotHotkeyAttempts`.
 - SCUM/BattlEye session reconstruction through `game_sessions_*.txt`, timeline/evidence entries, and Discord attachments.
 - `-GameSessionDate` and `-DisableGameSessionAnalysis` controls.
 - Memory-only output by default: final reports, run logs, hashes, and case ZIP are prepared as Discord attachments without writing local files.
